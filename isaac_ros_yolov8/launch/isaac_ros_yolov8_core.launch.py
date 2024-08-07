@@ -86,6 +86,10 @@ class IsaacROSYolov8LaunchFragment(IsaacROSLaunchFragment):
 
         encoder_dir = get_package_share_directory('isaac_ros_dnn_image_encoder')
 
+        # Sub Topic name
+        image_input_topic = LaunchConfiguration('image_input_topic')
+        camera_info_input_topic = LaunchConfiguration('camera_info_input_topic')
+
         return {
             'network_image_width': DeclareLaunchArgument(
                 'network_image_width',
@@ -157,6 +161,16 @@ class IsaacROSYolov8LaunchFragment(IsaacROSLaunchFragment):
                 default_value='0.45',
                 description='NMS IOU threshold'
             ),
+            'image_input_topic': DeclareLaunchArgument(
+                'image_input_topic',
+                default_value='/color/image_raw',
+                description='Image input topic name'
+            ),
+            'camera_info_input_topic': DeclareLaunchArgument(
+                'camera_info_input_topic',
+                default_value='/color/camera_info',
+                description='Camera info input topic name'
+            ),
             'yolov8_encoder_launch': IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
                     [os.path.join(encoder_dir, 'launch', 'dnn_image_encoder.launch.py')]
@@ -171,8 +185,8 @@ class IsaacROSYolov8LaunchFragment(IsaacROSLaunchFragment):
                     'attach_to_shared_component_container': 'True',
                     'component_container_name': '/isaac_ros_examples/container',
                     'dnn_image_encoder_namespace': 'yolov8_encoder',
-                    'image_input_topic': '/image_rect',
-                    'camera_info_input_topic': '/camera_info_rect',
+                    'image_input_topic': image_input_topic,
+                    'camera_info_input_topic': camera_info_input_topic,
                     'tensor_output_topic': '/tensor_pub',
                 }.items(),
             ),
