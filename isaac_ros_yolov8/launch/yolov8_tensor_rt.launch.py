@@ -62,6 +62,16 @@ def generate_launch_description():
             'force_engine_update',
             default_value='False',
             description='Whether TensorRT should update the TensorRT engine file or not'),
+         DeclareLaunchArgument(
+            'image_input_topic',
+            default_value='/color/image_raw',
+            description='The namespace to put the DNN image encoder under',
+        ),
+        DeclareLaunchArgument(
+            'camera_info_input_topic',
+            default_value='/color/camera_info',
+            description='The namespace to put the DNN image encoder under',
+        ),
     ]
 
     # DNN Image Encoder parameters
@@ -86,6 +96,10 @@ def generate_launch_description():
     confidence_threshold = LaunchConfiguration('confidence_threshold')
     nms_threshold = LaunchConfiguration('nms_threshold')
 
+    # Custom Input Tensor
+    image_input_topic = LaunchConfiguration('image_input_topic')
+    camera_info_input_topic = LaunchConfiguration('camera_info_input_topic')
+     
     encoder_dir = get_package_share_directory('isaac_ros_dnn_image_encoder')
     yolov8_encoder_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -101,8 +115,8 @@ def generate_launch_description():
             'attach_to_shared_component_container': 'True',
             'component_container_name': 'tensor_rt_container',
             'dnn_image_encoder_namespace': 'yolov8_encoder',
-            'image_input_topic': '/image',
-            'camera_info_input_topic': '/camera_info',
+            'image_input_topic': image_input_topic,
+            'camera_info_input_topic': camera_info_input_topic,
             'tensor_output_topic': '/tensor_pub',
         }.items(),
     )
