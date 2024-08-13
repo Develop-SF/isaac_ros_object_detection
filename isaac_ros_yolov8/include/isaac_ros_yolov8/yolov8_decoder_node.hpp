@@ -28,6 +28,7 @@
 #include "std_msgs/msg/string.hpp"
 #include "vision_msgs/msg/detection2_d_array.hpp"
 #include "isaac_ros_nitros_tensor_list_type/nitros_tensor_list_view.hpp"
+#include "sensor_msgs/msg/camera_info.hpp" // 添加这一行
 
 namespace nvidia
 {
@@ -45,7 +46,8 @@ public:
 
 private:
   void InputCallback(const nvidia::isaac_ros::nitros::NitrosTensorListView & msg);
-
+  void CameraInfoCallback(const sensor_msgs::msg::CameraInfo::SharedPtr msg);
+  
   // Subscription to input NitrosTensorList messages
   std::shared_ptr<nvidia::isaac_ros::nitros::ManagedNitrosSubscriber<
       nvidia::isaac_ros::nitros::NitrosTensorListView>> nitros_sub_;
@@ -59,6 +61,12 @@ private:
   // YOLOv8 Decoder Parameters
   double confidence_threshold_{};
   double nms_threshold_{};
+
+  int original_width_;
+  int original_height_;
+
+  rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_sub_;
+
 };
 
 }  // namespace yolov8

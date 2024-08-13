@@ -16,6 +16,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "isaac_ros_yolov8/yolov8_decoder_node.hpp"
+#include "sensor_msgs/msg/camera_info.hpp" // 添加这一行
 
 #include <cuda_runtime.h>
 #include <algorithm>
@@ -54,10 +55,21 @@ YoloV8DecoderNode::YoloV8DecoderNode(const rclcpp::NodeOptions options)
       "detections_output", 50)},
   tensor_name_{declare_parameter<std::string>("tensor_name", "output_tensor")},
   confidence_threshold_{declare_parameter<double>("confidence_threshold", 0.25)},
-  nms_threshold_{declare_parameter<double>("nms_threshold", 0.45)}
-{}
+  nms_threshold_{declare_parameter<double>("nms_threshold", 0.45)},
+  original_width_(0), // 初始化原始宽度
+  original_height_(0) // 初始化原始高度
+{
+  // 初始化 Camera Info Sub
+  camera_info_sub_ = create_subscription<sensor_msgs::msg::CameraInfo>(
+      "/color/camera_info", 10, std::bind(&YoloV8DecoderNode::CameraInfoCallback, this, std::placeholders::_1));
+}
 
 YoloV8DecoderNode::~YoloV8DecoderNode() = default;
+
+void YoloV8DecoderNode::CameraInfoCallback(const sensor_msgs::msg::CameraInfo::SharedPtr msg) {
+  this->original_width_ = msg->width;  // 使用 this-> 访问成员变量
+  this->original_height_ = msg->height; // 使用 this-> 访问成员变量
+}
 
 void YoloV8DecoderNode::InputCallback(const nvidia::isaac_ros::nitros::NitrosTensorListView & msg)
 {
@@ -77,6 +89,22 @@ void YoloV8DecoderNode::InputCallback(const nvidia::isaac_ros::nitros::NitrosTen
   int out_dim = 8400;
   float * results_data = reinterpret_cast<float *>(results_vector.data());
 
+  // 调整后的图像的宽度和高度
+  int resized_width = 640; // 调整后的宽度
+  int resized_height = 640; // 调整后的高度
+
+  // 原始图像的宽度和高度
+  int original_width = original_width_; // 从 Camera Info 获取
+  int original_height = original_height_; // 从 Camera Info 获取
+
+  // 计算缩放因子
+  float scale = std::min(resized_width / static_cast<float>(original_width), 
+    resized_height / static_cast<float>(original_height));
+
+  // 计算填充偏移（假设填充是均匀的）
+  float padding_x = (resized_width - (original_width * scale)) / 2.0f;
+  float padding_y = (resized_height - (original_height * scale)) / 2.0f;
+
   for (int i = 0; i < out_dim; i++) {
     float x = *(results_data + i);
     float y = *(results_data + (out_dim * 1) + i);
@@ -88,6 +116,13 @@ void YoloV8DecoderNode::InputCallback(const nvidia::isaac_ros::nitros::NitrosTen
     float width = w;
     float height = h;
 
+    // 还原到原始解析度
+    float x1_scaled = (x1 / scale) - padding_x;
+    float y1_scaled = (y1 / scale) - padding_y;
+    float width_scaled = width / scale;
+    float height_scaled = height / scale;
+
+
     std::vector<float> conf;
     for (int j = 0; j < num_classes; j++) {
       conf.push_back(*(results_data + (out_dim * (4 + j)) + i));
@@ -98,7 +133,7 @@ void YoloV8DecoderNode::InputCallback(const nvidia::isaac_ros::nitros::NitrosTen
     int max_index = distance(std::begin(conf), ind_max_conf);
     float val_max_conf = *max_element(std::begin(conf), std::end(conf));
 
-    bboxes.push_back(cv::Rect(x1, y1, width, height));
+    bboxes.push_back(cv::Rect(x1_scaled, y1_scaled, width_scaled, height_scaled));
     indices.push_back(i);
     scores.push_back(val_max_conf);
     classes.push_back(max_index);

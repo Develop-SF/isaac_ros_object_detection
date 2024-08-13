@@ -30,7 +30,7 @@ from sensor_msgs.msg import Image
 from vision_msgs.msg import Detection2DArray
 
 names = {
-        0: 'person',
+        0: 'Grape Juice',
         1: 'bicycle',
         2: 'car',
         3: 'motorcycle',
@@ -131,7 +131,7 @@ class Yolov8Visualizer(Node):
         self._image_subscription = message_filters.Subscriber(
             self,
             Image,
-            '/yolov8_encoder/resize/image')
+            '/color/image_raw')
 
         self.time_synchronizer = message_filters.TimeSynchronizer(
             [self._detections_subscription, self._image_subscription],
