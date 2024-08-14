@@ -117,8 +117,8 @@ void YoloV8DecoderNode::InputCallback(const nvidia::isaac_ros::nitros::NitrosTen
     float height = h;
 
     // 还原到原始解析度
-    float x1_scaled = (x1 / scale) - padding_x;
-    float y1_scaled = (y1 / scale) - padding_y;
+    float x1_scaled = (x1 - padding_x) / scale;
+    float y1_scaled = (y1 - padding_y) / scale;
     float width_scaled = width / scale;
     float height_scaled = height / scale;
 
