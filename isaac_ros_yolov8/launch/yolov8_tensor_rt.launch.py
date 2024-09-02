@@ -64,12 +64,12 @@ def generate_launch_description():
             description='Whether TensorRT should update the TensorRT engine file or not'),
          DeclareLaunchArgument(
             'image_input_topic',
-            default_value='/color/image_raw',
+            default_value='/camera/color/image_raw',
             description='The namespace to put the DNN image encoder under',
         ),
         DeclareLaunchArgument(
             'camera_info_input_topic',
-            default_value='/color/camera_info',
+            default_value='/camera/color/camera_info',
             description='The namespace to put the DNN image encoder under',
         ),
     ]
@@ -144,7 +144,10 @@ def generate_launch_description():
         parameters=[{
             'confidence_threshold': confidence_threshold,
             'nms_threshold': nms_threshold,
-        }]
+        }],
+        remappings=[
+            ('/color/camera_info', camera_info_input_topic)
+        ]
     )
 
     tensor_rt_container = ComposableNodeContainer(
