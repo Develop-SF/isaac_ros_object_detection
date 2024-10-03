@@ -30,9 +30,9 @@ from sensor_msgs.msg import Image
 from vision_msgs.msg import Detection2DArray
 
 names = {
-        0: 'Grape Juice',
-        1: 'bicycle',
-        2: 'car',
+        0: 'ladle',
+        1: 'sauce',
+        2: 'seasoning',
         3: 'motorcycle',
         4: 'airplane',
         5: 'bus',
@@ -127,11 +127,11 @@ class Yolov8Visualizer(Node):
         self._detections_subscription = message_filters.Subscriber(
             self,
             Detection2DArray,
-            'detections_output')
+            '/fused_detections')
         self._image_subscription = message_filters.Subscriber(
             self,
             Image,
-            '/color/image_raw')
+            '/camera/color/image_raw')
 
         self.time_synchronizer = message_filters.TimeSynchronizer(
             [self._detections_subscription, self._image_subscription],
@@ -148,7 +148,7 @@ class Yolov8Visualizer(Node):
             width = detection.bbox.size_x
             height = detection.bbox.size_y
 
-            label = names[int(detection.results[0].hypothesis.class_id)]
+            label = names[int(detection.results[0].hypothesis.class_id[0])]
             conf_score = detection.results[0].hypothesis.score
             label = f'{label} {conf_score:.2f}'
 
