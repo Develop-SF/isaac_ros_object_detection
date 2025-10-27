@@ -72,6 +72,8 @@ private:
   // Camera info subscription
   rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_sub_;
   std::string camera_info_topic_{"/camera_info"};
+
+  int target_class_id_;  // New: Target class ID for filtering (-1 = no filter)
 };
 
 }  // namespace yolov8

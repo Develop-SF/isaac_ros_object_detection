@@ -58,7 +58,8 @@ YoloV8DecoderNode::YoloV8DecoderNode(const rclcpp::NodeOptions options)
   nms_threshold_{declare_parameter<double>("nms_threshold", 0.45)},
   num_classes_{declare_parameter<int64_t>("num_classes", 80)},
   network_width_{declare_parameter<int64_t>("network_width", 640)},
-  network_height_{declare_parameter<int64_t>("network_height", 640)}
+  network_height_{declare_parameter<int64_t>("network_height", 640)},
+  target_class_id_{declare_parameter<int>("target_class_id", -1)}  // -1 means no filtering
 {
   // Camera info topic parameter and subscription
   camera_info_topic_ = declare_parameter<std::string>("camera_info_topic", camera_info_topic_);
@@ -170,10 +171,13 @@ void YoloV8DecoderNode::InputCallback(const nvidia::isaac_ros::nitros::NitrosTen
       height_scaled = height / scale;
     }
 
-    bboxes.push_back(cv::Rect(x1_scaled, y1_scaled, width_scaled, height_scaled));
-    indices.push_back(i);
-    scores.push_back(val_max_conf);
-    classes.push_back(max_index);
+    // Filter by target class ID if specified
+    if (target_class_id_ == -1 || max_index == target_class_id_) {
+      bboxes.push_back(cv::Rect(x1_scaled, y1_scaled, width_scaled, height_scaled));
+      indices.push_back(i);
+      scores.push_back(val_max_conf);
+      classes.push_back(max_index);
+    }
   }
 
   RCLCPP_DEBUG(this->get_logger(), "Count of bboxes: %lu", bboxes.size());
