@@ -58,9 +58,9 @@ YoloV8DecoderNode::YoloV8DecoderNode(const rclcpp::NodeOptions options)
   nms_threshold_{declare_parameter<double>("nms_threshold", 0.45)},
   num_classes_{declare_parameter<int64_t>("num_classes", 80)},
   network_width_{declare_parameter<int64_t>("network_width", 640)},
-  network_height_{declare_parameter<int64_t>("network_height", 640)},
-  target_class_id_{declare_parameter<int>("target_class_id", -1)}  // -1 means no filtering
+  network_height_{declare_parameter<int64_t>("network_height", 640)}
 {
+
   // Camera info topic parameter and subscription
   camera_info_topic_ = declare_parameter<std::string>("camera_info_topic", camera_info_topic_);
   camera_info_sub_ = create_subscription<sensor_msgs::msg::CameraInfo>(
@@ -83,7 +83,6 @@ void YoloV8DecoderNode::InputCallback(const nvidia::isaac_ros::nitros::NitrosTen
   std::vector<float> results_vector{};
   results_vector.resize(buffer_size);
   cudaMemcpy(results_vector.data(), tensor.GetBuffer(), buffer_size, cudaMemcpyDefault);
-  
   // Safety check: Verify tensor data is valid
   if (buffer_size == 0 || results_vector.empty()) {
     RCLCPP_ERROR(this->get_logger(), "Invalid tensor: empty or zero-sized buffer");
@@ -95,8 +94,7 @@ void YoloV8DecoderNode::InputCallback(const nvidia::isaac_ros::nitros::NitrosTen
   std::vector<int> indices;
   std::vector<int> classes;
 
-  // For YOLOv8, assume standard output format and default to 8400 anchors
-  // We'll use the configured num_classes_ parameter, but limit the access to avoid out-of-bounds
+  //  Output dimensions = [1, 84, 8400]
   int out_dim = 8400;  // Default anchor count for YOLOv8 models
   
   // Estimate tensor dimensions from buffer size
@@ -170,14 +168,10 @@ void YoloV8DecoderNode::InputCallback(const nvidia::isaac_ros::nitros::NitrosTen
       width_scaled = width / scale;
       height_scaled = height / scale;
     }
-
-    // Filter by target class ID if specified
-    if (target_class_id_ == -1 || max_index == target_class_id_) {
-      bboxes.push_back(cv::Rect(x1_scaled, y1_scaled, width_scaled, height_scaled));
-      indices.push_back(i);
-      scores.push_back(val_max_conf);
-      classes.push_back(max_index);
-    }
+    bboxes.push_back(cv::Rect(x1_scaled, y1_scaled, width_scaled, height_scaled));
+    indices.push_back(i);
+    scores.push_back(val_max_conf);
+    classes.push_back(max_index);
   }
 
   RCLCPP_DEBUG(this->get_logger(), "Count of bboxes: %lu", bboxes.size());

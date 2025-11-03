@@ -34,6 +34,12 @@ include_directories(${OpenCV_INCLUDE_DIRS})
 ament_auto_find_build_dependencies()
 find_package(ament_cmake_python REQUIRED)
 
+# yolov8 Detection2DArray VLM Filter node
+ament_auto_add_library(detection2_d_array_vlm_filter_node SHARED src/detection2_d_array_vlm_filter.cpp)
+rclcpp_components_register_nodes(detection2_d_array_vlm_filter_node "nvidia::isaac_ros::yolov8::Detection2DArrayVLMFilter")
+set(node_plugins "${node_plugins}nvidia::isaac_ros::yolov8::Detection2DArrayVLMFilter;$<TARGET_FILE:detection2_d_array_vlm_filter_node>\n")
+
+
 # yolov8 Decoder node
 ament_auto_add_library(yolov8_decoder_node SHARED src/yolov8_decoder_node.cpp)
 rclcpp_components_register_nodes(yolov8_decoder_node "nvidia::isaac_ros::yolov8::YoloV8DecoderNode")
