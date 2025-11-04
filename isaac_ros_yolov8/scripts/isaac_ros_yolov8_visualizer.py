@@ -172,11 +172,16 @@ class Yolov8Visualizer(Node):
 
             class_id = int(detection.results[0].hypothesis.class_id)
             if class_id in self.names:
-                label = self.names[class_id]
+                obj_name = self.names[class_id]
             else:
-                label = f'class_{class_id}'  # Fallback for unknown classes
+                obj_name = f'class_{class_id}'  # Fallback for unknown classes
             conf_score = detection.results[0].hypothesis.score
-            label = f'{label} {conf_score:.2f}'
+            
+            # Extract track ID from detection.id
+            track_id = detection.id if detection.id else 'N/A'
+            
+            # Format: obj_name(id): conf
+            label = f'{obj_name}({track_id}): {conf_score:.2f}'
 
             min_pt = (round(center_x - (width / 2.0)),
                       round(center_y - (height / 2.0)))
