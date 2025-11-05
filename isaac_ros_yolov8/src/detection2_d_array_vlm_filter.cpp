@@ -14,6 +14,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <functional>
+#include <future>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -403,7 +404,7 @@ private:
         std::string new_value = param.as_string();
         result.successful = true;
         
-        // Clear track_id when target class changes
+        // Clear track_id when target class changes and cancel ongoing VLM requests
         {
           std::lock_guard<std::mutex> lock(track_id_mutex_);
           if (new_value != desired_class_name_) {
@@ -411,6 +412,17 @@ private:
             RCLCPP_INFO(get_logger(), 
                         "Target class updated: '%s' -> '%s' (track_id cleared)",
                         desired_class_name_.c_str(), new_value.c_str());
+            
+            // Cancel ongoing VLM processing and clear queue
+            {
+              std::lock_guard<std::mutex> vlm_lock(vlm_queue_mutex_);
+              cancel_current_vlm_ = true;
+              // Clear pending VLM tasks
+              while (!vlm_task_queue_.empty()) {
+                vlm_task_queue_.pop();
+              }
+              RCLCPP_INFO(get_logger(), "Cancelled ongoing VLM requests and cleared queue");
+            }
           }
         }
         
@@ -665,7 +677,7 @@ private:
         }
 
         filtered_detection2_d_pub_->publish(detection_to_publish);
-        RCLCPP_INFO(get_logger(), "Published detection with track ID: %s", track_id_.c_str());
+        // RCLCPP_INFO(get_logger(), "Published detection with track ID: %s", track_id_.c_str());
         return;
       }
     }
