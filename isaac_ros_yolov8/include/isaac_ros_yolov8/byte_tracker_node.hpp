@@ -108,6 +108,8 @@ private:
    */
   void reset();
 
+  rclcpp::QoS input_qos_;
+  rclcpp::QoS output_qos_;
   // ROS subscribers and publishers
   rclcpp::Subscription<vision_msgs::msg::Detection2DArray>::SharedPtr detection_sub_;
   rclcpp::Publisher<vision_msgs::msg::Detection2DArray>::SharedPtr tracked_pub_;
@@ -135,4 +137,3 @@ private:
 }  // namespace nvidia
 
 #endif  // ISAAC_ROS_YOLOV8__BYTE_TRACKER_NODE_HPP_
-

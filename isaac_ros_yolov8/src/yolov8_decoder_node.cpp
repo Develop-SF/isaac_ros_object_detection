@@ -34,6 +34,7 @@
 #include "vision_msgs/msg/detection2_d_array.hpp"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 #include "sensor_msgs/msg/camera_info.hpp"
+#include "isaac_ros_common/qos.hpp"
 
 
 namespace nvidia
@@ -44,15 +45,19 @@ namespace yolov8
 {
 YoloV8DecoderNode::YoloV8DecoderNode(const rclcpp::NodeOptions options)
 : rclcpp::Node("yolov8_decoder_node", options),
+  input_qos_(::isaac_ros::common::AddQosParameter(*this, "DEFAULT", "input_qos")),
+  output_qos_(::isaac_ros::common::AddQosParameter(*this, "DEFAULT", "output_qos")),
   nitros_sub_{std::make_shared<nvidia::isaac_ros::nitros::ManagedNitrosSubscriber<
         nvidia::isaac_ros::nitros::NitrosTensorListView>>(
       this,
       "tensor_sub",
       nvidia::isaac_ros::nitros::nitros_tensor_list_nchw_rgb_f32_t::supported_type_name,
       std::bind(&YoloV8DecoderNode::InputCallback, this,
-      std::placeholders::_1))},
+      std::placeholders::_1),
+      nvidia::isaac_ros::nitros::NitrosDiagnosticsConfig(),
+      input_qos_)},
   pub_{create_publisher<vision_msgs::msg::Detection2DArray>(
-      "detections_output", 50)},
+      "detections_output", output_qos_)},
   tensor_name_{declare_parameter<std::string>("tensor_name", "output_tensor")},
   confidence_threshold_{declare_parameter<double>("confidence_threshold", 0.25)},
   nms_threshold_{declare_parameter<double>("nms_threshold", 0.45)},

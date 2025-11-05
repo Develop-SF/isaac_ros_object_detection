@@ -8,16 +8,20 @@
  */
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <queue>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -67,15 +71,21 @@ public:
     vlm_url_(declare_parameter<std::string>("vlm_url", "http://localhost:11434")),
     timeout_seconds_(std::max<int>(declare_parameter<int>("timeout", 300), 0)),
     max_token_(std::max<int>(declare_parameter<int>("max_token", 0), 0)),
-    track_id_("0")
+    vlm_sampling_rate_(std::max<double>(declare_parameter<double>("vlm_sampling_rate", 0.2), 0.01)),
+    track_id_("0"),
+    vlm_processing_(false),
+    shutdown_requested_(false)
   {
-    // Create callback groups to prevent execution conflicts
-    sync_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::Reentrant);
+    // Create callback groups
     detection_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::Reentrant);
+    image_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::Reentrant);
     
-    // Options for the subscription
+    // Options for subscriptions
     rclcpp::SubscriptionOptions detection_options;
     detection_options.callback_group = detection_callback_group_;
+    
+    rclcpp::SubscriptionOptions image_options;
+    image_options.callback_group = image_callback_group_;
     
     filtered_detection2_d_pub_ = create_publisher<vision_msgs::msg::Detection2D>(
       "vlm_selected_detections", output_qos_);
@@ -83,21 +93,43 @@ public:
     vlm_reason_pub_ = create_publisher<std_msgs::msg::String>(
       "vlm_reason", output_qos_);
 
-    setupSynchronizer();
-
-    // Use callback group for the detection-only subscription
+    // Subscribe to detections for fast republishing
     detections_only_sub_ = create_subscription<vision_msgs::msg::Detection2DArray>(
       "detection2_d_array", input_qos_, 
       std::bind(&Detection2DArrayVLMFilter::bboxesCallback, this, std::placeholders::_1),
       detection_options);
 
+    // Subscribe to image for periodic VLM sampling (throttled)
+    image_sub_simple_ = create_subscription<sensor_msgs::msg::Image>(
+      "image", input_qos_,
+      std::bind(&Detection2DArrayVLMFilter::imageSamplingCallback, this, std::placeholders::_1),
+      image_options);
+
     vlmInit();
+    
+    // Start VLM worker thread
+    vlm_worker_thread_ = std::thread(&Detection2DArrayVLMFilter::vlmWorkerThread, this);
 
     // Register parameter callback for runtime updates
     param_callback_handle_ = add_on_set_parameters_callback(
       std::bind(&Detection2DArrayVLMFilter::parametersCallback, this, std::placeholders::_1));
     
-    RCLCPP_INFO(get_logger(), "Node initialized. Target class: '%s'", desired_class_name_.c_str());
+    RCLCPP_INFO(get_logger(), "Node initialized. Target class: '%s', VLM sampling rate: %.2f Hz", 
+                desired_class_name_.c_str(), vlm_sampling_rate_);
+  }
+
+  ~Detection2DArrayVLMFilter()
+  {
+    // Signal shutdown and wait for worker thread
+    {
+      std::lock_guard<std::mutex> lock(vlm_queue_mutex_);
+      shutdown_requested_ = true;
+    }
+    vlm_queue_cv_.notify_all();
+    
+    if (vlm_worker_thread_.joinable()) {
+      vlm_worker_thread_.join();
+    }
   }
 
 private:
@@ -107,28 +139,247 @@ private:
     std::string image_base64;
   };
 
-  void setupSynchronizer()
+  // VLM task structure for async processing
+  struct VLMTask {
+    sensor_msgs::msg::Image::ConstSharedPtr image_msg;
+    vision_msgs::msg::Detection2DArray::ConstSharedPtr detections_msg;
+  };
+
+  // Async VLM worker thread
+  void vlmWorkerThread()
   {
-    const auto qos_profile = input_qos_.get_rmw_qos_profile();
+    RCLCPP_INFO(get_logger(), "VLM worker thread started");
+    
+    while (!shutdown_requested_) {
+      VLMTask task;
+      
+      // Wait for a task
+      {
+        std::unique_lock<std::mutex> lock(vlm_queue_mutex_);
+        vlm_queue_cv_.wait(lock, [this] { 
+          return !vlm_task_queue_.empty() || shutdown_requested_; 
+        });
+        
+        if (shutdown_requested_) {
+          break;
+        }
+        
+        if (!vlm_task_queue_.empty()) {
+          task = std::move(vlm_task_queue_.front());
+          vlm_task_queue_.pop();
+        } else {
+          continue;
+        }
+      }
+      
+      // Process task asynchronously
+      processVLMTask(task);
+      
+      vlm_processing_.store(false);
+    }
+    
+    RCLCPP_INFO(get_logger(), "VLM worker thread stopped");
+  }
 
-    // Create subscription options with the synchronizer callback group
-    rclcpp::SubscriptionOptions sync_options;
-    sync_options.callback_group = sync_callback_group_;
+  // Throttled image sampling callback - runs at vlm_sampling_rate_ Hz
+  void imageSamplingCallback(const sensor_msgs::msg::Image::ConstSharedPtr & image_msg)
+  {
+    // Throttle based on vlm_sampling_rate_
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::duration<double>>(
+      now - last_vlm_sample_time_).count();
+    
+    if (elapsed < (1.0 / vlm_sampling_rate_)) {
+      return;  // Skip this frame
+    }
+    
+    last_vlm_sample_time_ = now;
+    
+    // Skip if VLM is already processing
+    if (vlm_processing_.load()) {
+      RCLCPP_DEBUG(get_logger(), "VLM still processing, skipping frame");
+      return;
+    }
+    
+    // Get latest detections (non-blocking, just cache the latest)
+    vision_msgs::msg::Detection2DArray::ConstSharedPtr latest_detections;
+    {
+      std::lock_guard<std::mutex> lock(cached_detections_mutex_);
+      if (!cached_detections_) {
+        RCLCPP_DEBUG(get_logger(), "No cached detections available");
+        return;
+      }
+      latest_detections = cached_detections_;
+    }
+    
+    // Create VLM task
+    VLMTask task;
+    task.image_msg = image_msg;
+    task.detections_msg = latest_detections;
+    
+    // Queue the task (with size limit to prevent backpressure)
+    {
+      std::lock_guard<std::mutex> lock(vlm_queue_mutex_);
+      if (vlm_task_queue_.size() >= 2) {
+        RCLCPP_DEBUG(get_logger(), "VLM queue full, skipping frame to prevent backpressure");
+        return;
+      }
+      vlm_task_queue_.push(std::move(task));
+    }
+    
+    vlm_processing_.store(true);
+    vlm_queue_cv_.notify_one();
+  }
 
-    // Create message filter subscribers with callback group
-    image_sub_ = std::make_unique<message_filters::Subscriber<sensor_msgs::msg::Image>>(
-      this, "image", qos_profile, sync_options);
-    detections_sub_ = std::make_unique<message_filters::Subscriber<vision_msgs::msg::Detection2DArray>>(
-      this, "detection2_d_array", qos_profile, sync_options);
+  // Process VLM task in worker thread
+  void processVLMTask(const VLMTask & task)
+  {
+    const auto candidate_detections = collectCandidateDetections(*task.detections_msg);
+    if (candidate_detections.empty()) {
+      return;
+    }
 
-    synchronizer_ = std::make_shared<message_filters::Synchronizer<ExactTimePolicy>>(
-      ExactTimePolicy(sync_queue_size_), *image_sub_, *detections_sub_);
-    synchronizer_->registerCallback(
-      std::bind(
-        &Detection2DArrayVLMFilter::imageCallback,
-        this,
-        std::placeholders::_1,
-        std::placeholders::_2));
+    cv_bridge::CvImageConstPtr bridge;
+    try {
+      bridge = cv_bridge::toCvShare(task.image_msg, sensor_msgs::image_encodings::BGR8);
+    } catch (const cv_bridge::Exception & ex) {
+      RCLCPP_WARN(get_logger(), "Falling back to native image encoding: %s", ex.what());
+      try {
+        bridge = cv_bridge::toCvShare(task.image_msg, task.image_msg->encoding);
+      } catch (const cv_bridge::Exception & inner_ex) {
+        RCLCPP_ERROR(get_logger(), "Failed to convert image: %s", inner_ex.what());
+        return;
+      }
+    }
+
+    cv::Mat image = bridge->image;
+    if (image.empty()) {
+      RCLCPP_WARN(get_logger(), "Received empty image frame");
+      return;
+    }
+
+    std::vector<TrackImagePayload> track_image_payloads;
+    track_image_payloads.reserve(candidate_detections.size());
+
+    for (size_t idx = 0; idx < candidate_detections.size(); ++idx) {
+      const auto * detection_ptr = candidate_detections[idx];
+      auto roi_opt = detectionToRoi(*detection_ptr, image.cols, image.rows);
+      if (!roi_opt) {
+        continue;
+      }
+
+      const cv::Rect roi = *roi_opt;
+      cv::Mat cropped = image(roi).clone();
+      if (cropped.empty()) {
+        continue;
+      }
+
+      std::vector<unsigned char> buffer;
+      if (!cv::imencode(".jpg", cropped, buffer)) {
+        continue;
+      }
+
+      std::string track_id = detection_ptr->id;
+      if (track_id.empty()) {
+        track_id = "det_" + std::to_string(idx);
+      }
+
+      track_image_payloads.push_back(TrackImagePayload{track_id, base64_encode(buffer)});
+    }
+
+    if (track_image_payloads.empty()) {
+      return;
+    }
+
+    std::string selected_track_id;
+    
+    if (desired_class_id_.empty()) {
+      selected_track_id = track_image_payloads.front().track_id;
+      std::lock_guard<std::mutex> lock(track_id_mutex_);
+      track_id_ = selected_track_id;
+    } else {
+      // Query VLM for each detection in parallel using threads
+      std::vector<VLMJsonResponse> all_responses;
+      all_responses.resize(track_image_payloads.size());
+      auto total_start_time = std::chrono::steady_clock::now();
+      
+      std::vector<std::thread> query_threads;
+      query_threads.reserve(track_image_payloads.size());
+      
+      for (size_t i = 0; i < track_image_payloads.size(); ++i) {
+        query_threads.emplace_back([this, i, &track_image_payloads, &all_responses]() {
+          const auto & payload = track_image_payloads[i];
+          RCLCPP_INFO(get_logger(), "Querying VLM for Track ID: %s", payload.track_id.c_str());
+          
+          auto vlm_response = queryVlmSingle(vlm_prompt_, payload.track_id, payload.image_base64);
+          
+          if (vlm_response) {
+            VLMJsonResponse parsed = parseVLMResponse(*vlm_response);
+            if (parsed.valid) {
+              all_responses[i] = parsed;
+            }
+          }
+        });
+      }
+      
+      // Wait for all queries to complete
+      for (auto & thread : query_threads) {
+        if (thread.joinable()) {
+          thread.join();
+        }
+      }
+      
+      // Process results and find match
+      for (const auto & parsed : all_responses) {
+        if (!parsed.valid) continue;
+        
+        if (selected_track_id.empty() && containsCaseInsensitive(parsed.object_name, desired_class_name_)) {
+          selected_track_id = parsed.id;
+          RCLCPP_INFO(get_logger(), "Found match! Track ID: %s is %s", 
+                      selected_track_id.c_str(), parsed.object_name.c_str());
+          
+          // Publish reason
+          std_msgs::msg::String reason_msg;
+          reason_msg.data = "Match found - Track ID " + parsed.id + ": " + parsed.object_name;
+          vlm_reason_pub_->publish(reason_msg);
+        }
+      }
+      
+      auto total_end_time = std::chrono::steady_clock::now();
+      auto total_duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        total_end_time - total_start_time).count();
+      
+      RCLCPP_INFO(get_logger(), "VLM total processing time (parallel): %ld ms for %zu detections", 
+                  total_duration_ms, track_image_payloads.size());
+      
+      // Filter valid responses
+      std::vector<VLMJsonResponse> valid_responses;
+      for (const auto & resp : all_responses) {
+        if (resp.valid) valid_responses.push_back(resp);
+      }
+      
+      if (selected_track_id.empty() && !valid_responses.empty()) {
+        // No match - publish what was detected
+        std::ostringstream no_match_reason;
+        no_match_reason << "No '" << desired_class_name_ << "' found. Detected: ";
+        for (size_t i = 0; i < valid_responses.size(); ++i) {
+          if (i > 0) no_match_reason << ", ";
+          no_match_reason << "Track ID " << valid_responses[i].id << ": " << valid_responses[i].object_name;
+        }
+        
+        std_msgs::msg::String reason_msg;
+        reason_msg.data = no_match_reason.str();
+        vlm_reason_pub_->publish(reason_msg);
+        return;
+      }
+      
+      // Update track ID
+      if (!selected_track_id.empty()) {
+        std::lock_guard<std::mutex> lock(track_id_mutex_);
+        track_id_ = selected_track_id;
+        RCLCPP_INFO(get_logger(), "Updated track_id to: %s", selected_track_id.c_str());
+      }
+    }
   }
 
   void vlmInit()
@@ -176,14 +427,13 @@ private:
     return result;
   }
 
+	// System 2: careful thinking and make decision
   void imageCallback(
     const sensor_msgs::msg::Image::ConstSharedPtr & image_msg,
     const vision_msgs::msg::Detection2DArray::ConstSharedPtr & detections_msg)
   {
     const auto candidate_detections = collectCandidateDetections(*detections_msg);
     if (candidate_detections.empty()) {
-      std::lock_guard<std::mutex> lock(track_id_mutex_);
-      track_id_.clear();
       return;
     }
 
@@ -229,9 +479,9 @@ private:
       }
 
       // Debug: Display cropped image
-      cv::resize(cropped, cropped, cv::Size(240, 640), 0, 0, cv::INTER_LINEAR);
-      cv::imshow("Debug Image " + detection_ptr->id, cropped);
-      cv::waitKey(1);
+      // cv::resize(cropped, cropped, cv::Size(240, 640), 0, 0, cv::INTER_LINEAR);
+      // cv::imshow("Debug Image " + detection_ptr->id, cropped);
+      // cv::waitKey(1);
 
       std::vector<unsigned char> buffer;
       if (!cv::imencode(".jpg", cropped, buffer)) {
@@ -336,13 +586,7 @@ private:
           RCLCPP_WARN(get_logger(), "%s", combined_reason.c_str());
         }
         
-        // Clear track_id so bboxesCallback doesn't publish anything
-        {
-          std::lock_guard<std::mutex> lock(track_id_mutex_);
-          track_id_.clear();
-        }
-        
-        // Don't publish any detection bbox
+        // Don't publish any detection bbox, but keep previous track_id for bboxesCallback
         return;
       }
       
@@ -385,11 +629,18 @@ private:
     }
   }
 
+	// System 1: fast republish
   void bboxesCallback(const vision_msgs::msg::Detection2DArray::ConstSharedPtr & detections_msg)
   {
     if (!detections_msg) {
       RCLCPP_WARN(get_logger(), "Received null detections message");
       return;
+    }
+
+    // Cache detections for VLM processing
+    {
+      std::lock_guard<std::mutex> lock(cached_detections_mutex_);
+      cached_detections_ = detections_msg;
     }
 
     std::string current_track_id;
@@ -518,10 +769,11 @@ private:
     const std::string & track_id,
     const std::string & image_base64)
   {
-    std::lock_guard<std::mutex> lock(vlm_mutex_);
-    if (!vlm_client_) {
-      RCLCPP_INFO(get_logger(), "VLM client not initialized");
-      return std::nullopt;
+    // Create a thread-local client for parallel queries
+    httplib::Client local_client(vlm_url_);
+    if (timeout_seconds_ > 0) {
+      local_client.set_connection_timeout(timeout_seconds_, 0);
+      local_client.set_read_timeout(timeout_seconds_, 0);
     }
 
     // Build JSON payload with Ollama structured outputs format
@@ -555,7 +807,7 @@ private:
       {"Content-Type", "application/json"}
     };
 
-    auto response = vlm_client_->Post("/api/chat", headers, payload.str(), "application/json");
+    auto response = local_client.Post("/api/chat", headers, payload.str(), "application/json");
     if (!response) {
       RCLCPP_INFO(get_logger(), "VLM request failed: %s", httplib::to_string(response.error()).c_str());
       return std::nullopt;
@@ -696,8 +948,7 @@ private:
     return result;
   }
 
-  static constexpr int sync_queue_size_ = 10;
-
+  // Parameters
   rclcpp::QoS input_qos_;
   rclcpp::QoS output_qos_;
   std::string desired_class_id_;
@@ -705,25 +956,42 @@ private:
   std::string vlm_prompt_;
   std::string vlm_model_;
   std::string vlm_url_;
-  std::string image_topic_name_;
   int timeout_seconds_;
   int max_token_;
+  double vlm_sampling_rate_;
   std::string track_id_;
 
+  // Publishers
   rclcpp::Publisher<vision_msgs::msg::Detection2D>::SharedPtr filtered_detection2_d_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr vlm_reason_pub_;
+  
+  // Subscribers
   rclcpp::Subscription<vision_msgs::msg::Detection2DArray>::SharedPtr detections_only_sub_;
-  std::unique_ptr<message_filters::Subscriber<sensor_msgs::msg::Image>> image_sub_;
-  std::unique_ptr<message_filters::Subscriber<vision_msgs::msg::Detection2DArray>> detections_sub_;
-  std::shared_ptr<message_filters::Synchronizer<ExactTimePolicy>> synchronizer_;
+  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_simple_;
 
+  // VLM client
   std::mutex vlm_mutex_;
-  std::mutex track_id_mutex_;
   std::unique_ptr<httplib::Client> vlm_client_;
   
-  // Callback groups for execution control
-  rclcpp::CallbackGroup::SharedPtr sync_callback_group_;
+  // Async VLM processing
+  std::mutex vlm_queue_mutex_;
+  std::condition_variable vlm_queue_cv_;
+  std::queue<VLMTask> vlm_task_queue_;
+  std::thread vlm_worker_thread_;
+  std::atomic<bool> vlm_processing_;
+  std::atomic<bool> shutdown_requested_;
+  std::chrono::steady_clock::time_point last_vlm_sample_time_;
+  
+  // Detection caching
+  std::mutex cached_detections_mutex_;
+  vision_msgs::msg::Detection2DArray::ConstSharedPtr cached_detections_;
+  
+  // Track ID storage
+  std::mutex track_id_mutex_;
+  
+  // Callback groups
   rclcpp::CallbackGroup::SharedPtr detection_callback_group_;
+  rclcpp::CallbackGroup::SharedPtr image_callback_group_;
   
   // Parameter callback handle
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;

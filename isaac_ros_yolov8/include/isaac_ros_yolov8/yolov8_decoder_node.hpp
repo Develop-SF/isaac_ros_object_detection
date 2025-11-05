@@ -48,6 +48,10 @@ private:
   void InputCallback(const nvidia::isaac_ros::nitros::NitrosTensorListView & msg);
   void CameraInfoCallback(const sensor_msgs::msg::CameraInfo::SharedPtr msg);
 
+  // QoS profiles (must be declared before subscriber/publisher that use them)
+  rclcpp::QoS input_qos_;
+  rclcpp::QoS output_qos_;
+
   // Subscription to input NitrosTensorList messages
   std::shared_ptr<nvidia::isaac_ros::nitros::ManagedNitrosSubscriber<
       nvidia::isaac_ros::nitros::NitrosTensorListView>> nitros_sub_;

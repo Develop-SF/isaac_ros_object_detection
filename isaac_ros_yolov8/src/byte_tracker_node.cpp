@@ -17,6 +17,7 @@
 
 #include "isaac_ros_yolov8/byte_tracker_node.hpp"
 #include "isaac_ros_yolov8/matching.hpp"
+#include "isaac_ros_common/qos.hpp"
 
 #include <algorithm>
 #include <set>
@@ -31,6 +32,8 @@ namespace yolov8
 
 ByteTrackerNode::ByteTrackerNode(const rclcpp::NodeOptions & options)
 : Node("byte_tracker_node", options),
+  input_qos_(::isaac_ros::common::AddQosParameter(*this, "DEFAULT", "input_qos")),
+  output_qos_(::isaac_ros::common::AddQosParameter(*this, "DEFAULT", "output_qos")),
   frame_id_(0)
 {
   // Declare parameters
@@ -46,10 +49,10 @@ ByteTrackerNode::ByteTrackerNode(const rclcpp::NodeOptions & options)
 
   // Create subscriber and publisher
   detection_sub_ = create_subscription<vision_msgs::msg::Detection2DArray>(
-    "detections_input", 10,
+    "detections_input", input_qos_,
     std::bind(&ByteTrackerNode::detectionCallback, this, std::placeholders::_1));
 
-  tracked_pub_ = create_publisher<vision_msgs::msg::Detection2DArray>("tracked_detections", 10);
+  tracked_pub_ = create_publisher<vision_msgs::msg::Detection2DArray>("tracked_detections", output_qos_);
 
   RCLCPP_INFO(
     get_logger(),
@@ -423,4 +426,3 @@ void ByteTrackerNode::reset()
 // Register as component
 #include "rclcpp_components/register_node_macro.hpp"
 RCLCPP_COMPONENTS_REGISTER_NODE(nvidia::isaac_ros::yolov8::ByteTrackerNode)
-
