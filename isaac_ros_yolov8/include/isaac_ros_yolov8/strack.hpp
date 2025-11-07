@@ -141,6 +141,7 @@ public:
   double score() const {return score_;}
   std::string class_id() const {return class_id_;}
   int tracklet_len() const {return tracklet_len_;}
+  int frames_without_update() const {return frames_without_update_;}
 
   // Setters
   void set_track_id(int id) {track_id_ = id;}
@@ -166,6 +167,7 @@ private:
 
   double score_;
   std::string class_id_;
+  int frames_without_update_;  // Counter for frames without measurement updates
 
   static int _count;
 };

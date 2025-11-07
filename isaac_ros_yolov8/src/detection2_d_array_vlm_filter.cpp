@@ -74,6 +74,7 @@ public:
     max_token_(std::max<int>(declare_parameter<int>("max_token", 0), 0)),
     vlm_sampling_rate_(std::max<double>(declare_parameter<double>("vlm_sampling_rate", 0.2), 0.01)),
     track_id_(""),  // Start with empty track_id to prevent publishing before VLM processing
+    track_id_miss_count_(0),
     vlm_processing_(false),
     shutdown_requested_(false)
   {
@@ -675,20 +676,35 @@ private:
         }
 
         filtered_detection2_d_pub_->publish(detection_to_publish);
+        // Reset the miss counter when we successfully find the track
+        {
+          std::lock_guard<std::mutex> lock(track_id_mutex_);
+          track_id_miss_count_ = 0;
+        }
         // RCLCPP_INFO(get_logger(), "Published detection with track ID: %s", track_id_.c_str());
         return;
       }
     }
 
     // If we reach here, the track ID was not found in the current detections
-    // Clear the track_id and don't publish anything to avoid confusing downstream nodes
+    // Use a grace period before clearing to handle temporary tracking losses
     {
       std::lock_guard<std::mutex> lock(track_id_mutex_);
-      track_id_.clear();
+      track_id_miss_count_++;
+      
+      // Only clear after missing for multiple consecutive frames (grace period)
+      if (track_id_miss_count_ > 10) {  // ~0.3 seconds at 30 FPS
+        track_id_.clear();
+        track_id_miss_count_ = 0;
+        RCLCPP_WARN(get_logger(),
+          "Track ID %s not found for %d frames, cleared track_id", 
+          current_track_id.c_str(), track_id_miss_count_);
+      } else {
+        RCLCPP_DEBUG_THROTTLE(get_logger(), *get_clock(), 1000,
+          "Track ID %s temporarily lost (miss count: %d/10)", 
+          current_track_id.c_str(), track_id_miss_count_);
+      }
     }
-    
-    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
-      "Track ID %s not found in current detections, cleared track_id", current_track_id.c_str());
   }
 
   // collect the detections that match the desired class id
@@ -981,6 +997,7 @@ private:
   
   // Track ID storage
   std::mutex track_id_mutex_;
+  int track_id_miss_count_;  // Counter for consecutive frames without finding track_id
   
   // Callback groups
   rclcpp::CallbackGroup::SharedPtr detection_callback_group_;

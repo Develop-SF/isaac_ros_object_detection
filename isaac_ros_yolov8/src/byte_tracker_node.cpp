@@ -189,8 +189,18 @@ vision_msgs::msg::Detection2DArray ByteTrackerNode::update(
   }
 
   Eigen::MatrixXd dists_second = matching::iou_distance(r_tracked_ptrs, detections_second_ptrs);
+  
+  // Use adaptive threshold based on how long tracks have been without updates
+  // Tracks that have been drifting longer require higher IoU to match
+  double adaptive_thresh = 0.5;
+  for (const auto & track : r_tracked_stracks) {
+    if (track.frames_without_update() > 5) {
+      adaptive_thresh = std::min(adaptive_thresh, 0.7);  // Require higher IoU for drifting tracks
+    }
+  }
+  
   auto [matches_second, u_track_second, u_detection_second] = 
-    matching::linear_assignment(dists_second, 0.5);
+    matching::linear_assignment(dists_second, adaptive_thresh);
 
   for (const auto & [itracked, idet] : matches_second) {
     STrack & track = r_tracked_stracks[itracked];
@@ -211,6 +221,14 @@ vision_msgs::msg::Detection2DArray ByteTrackerNode::update(
     if (track.state() != TrackState::Lost) {
       track.mark_lost();
       lost_stracks.push_back(track);
+    }
+  }
+  
+  // Also mark any remaining unmatched tracks from first association as lost
+  for (int it : u_track) {
+    if (strack_pool[it].state() == TrackState::Tracked) {
+      strack_pool[it].mark_lost();
+      lost_stracks.push_back(strack_pool[it]);
     }
   }
 
@@ -261,6 +279,22 @@ vision_msgs::msg::Detection2DArray ByteTrackerNode::update(
       track.mark_removed();
       removed_stracks.push_back(track);
     }
+  }
+  
+  // Also remove tracks that have been without measurement updates for too long
+  // This helps prevent tracks from drifting indefinitely
+  std::vector<STrack> tracks_to_remove;
+  for (auto & track : tracked_stracks_) {
+    if (track.frames_without_update() > 10) {  // Remove tracks without updates for 10+ frames
+      RCLCPP_DEBUG(get_logger(), "Removing track %d due to %d frames without updates", 
+                   track.track_id(), track.frames_without_update());
+      track.mark_removed();
+      tracks_to_remove.push_back(track);
+    }
+  }
+  
+  for (const auto & track : tracks_to_remove) {
+    removed_stracks.push_back(track);
   }
 
   // Update internal state
@@ -343,13 +377,15 @@ bool ByteTrackerNode::shouldResetTracker(
   }
   
   // Check for dramatic change in detection count (scene change indicator)
+  // Use stricter thresholds to avoid false positives from normal detection variance
   if (last_detection_count_ > 0) {
     double count_ratio = static_cast<double>(current_detection_count) / last_detection_count_;
-    // If detection count changes dramatically (more than 3x increase or decrease to less than 1/3)
-    if (count_ratio > 3.0 || count_ratio < 0.33) {
+    // Require both: (1) dramatic ratio change (5x or 1/5), AND (2) significant absolute change (>3 detections)
+    int count_diff = std::abs(current_detection_count - last_detection_count_);
+    if ((count_ratio > 5.0 || count_ratio < 0.2) && count_diff > 3) {
       RCLCPP_INFO(get_logger(), 
-        "Scene change detected: detection count changed from %d to %d (ratio=%.2f)", 
-        last_detection_count_, current_detection_count, count_ratio);
+        "Scene change detected: detection count changed from %d to %d (ratio=%.2f, diff=%d)", 
+        last_detection_count_, current_detection_count, count_ratio, count_diff);
       last_detection_count_ = current_detection_count;
       return true;
     }

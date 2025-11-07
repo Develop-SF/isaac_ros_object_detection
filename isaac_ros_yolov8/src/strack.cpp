@@ -28,7 +28,8 @@ STrack::STrack(const vision_msgs::msg::Detection2D & detection)
   tracklet_len_(0),
   state_(TrackState::New),
   is_activated_(false),
-  score_(0.0)
+  score_(0.0),
+  frames_without_update_(0)
 {
   // Extract bounding box in tlwh format
   double center_x = detection.bbox.center.position.x;
@@ -53,17 +54,50 @@ STrack::STrack(const vision_msgs::msg::Detection2D & detection)
 
 void STrack::predict()
 {
+  frames_without_update_++;  // Increment counter for frames without updates
+  
   Eigen::VectorXd mean_state = mean_;
   if (state_ != TrackState::Tracked) {
     mean_state(7) = 0.0;  // Set velocity to zero for non-tracked states
   }
+  
+  // Store original state for drift limiting
+  Eigen::Vector4d original_xyah = mean_.head<4>();
+  std::array<double, 4> original_tlwh = _tlwh;
+  
   auto [pred_mean, pred_cov] = kalman_filter_->predict(mean_state, covariance_);
   mean_ = pred_mean;
   covariance_ = pred_cov;
 
   // Update tlwh from predicted state
   Eigen::Vector4d xyah = mean_.head<4>();
-  _tlwh = xyah_to_tlwh(xyah);
+  std::array<double, 4> predicted_tlwh = xyah_to_tlwh(xyah);
+  
+  // Limit drift: prevent aspect ratio and size from changing too dramatically
+  // This is especially important for tracks that haven't been updated recently
+  if (state_ != TrackState::Tracked || frames_without_update_ > 3) {
+    // For lost tracks or new tracks, limit the prediction drift
+    double aspect_ratio_change = std::abs(xyah(2) - original_xyah(2)) / original_xyah(2);
+    double height_change = std::abs(xyah(3) - original_xyah(3)) / original_xyah(3);
+    
+    // If changes are too dramatic (>50% for aspect ratio, >100% for height), limit them
+    if (aspect_ratio_change > 0.5) {
+      double sign = (xyah(2) > original_xyah(2)) ? 1.0 : -1.0;
+      xyah(2) = original_xyah(2) * (1.0 + sign * 0.5);
+      mean_(2) = xyah(2);
+    }
+    
+    if (height_change > 1.0) {
+      double sign = (xyah(3) > original_xyah(3)) ? 1.0 : -1.0;
+      xyah(3) = original_xyah(3) * (1.0 + sign * 1.0);
+      mean_(3) = xyah(3);
+    }
+    
+    // Recalculate tlwh with limited drift
+    _tlwh = xyah_to_tlwh(xyah);
+  } else {
+    _tlwh = predicted_tlwh;
+  }
 }
 
 void STrack::activate(std::shared_ptr<KalmanFilterXYAH> kalman_filter, int frame_id)
@@ -81,6 +115,7 @@ void STrack::activate(std::shared_ptr<KalmanFilterXYAH> kalman_filter, int frame
   is_activated_ = true;
   frame_id_ = frame_id;
   start_frame_ = frame_id;
+  frames_without_update_ = 0;  // Reset counter since we have a new measurement
 }
 
 void STrack::re_activate(const STrack & new_track, int frame_id, bool new_id)
@@ -110,6 +145,7 @@ void STrack::update(const STrack & new_track, int frame_id)
 {
   frame_id_ = frame_id;
   tracklet_len_++;
+  frames_without_update_ = 0;  // Reset counter since we have a new measurement
 
   Eigen::Vector4d xyah = tlwh_to_xyah(new_track._tlwh);
   auto [upd_mean, upd_cov] = kalman_filter_->update(mean_, covariance_, xyah);
@@ -187,9 +223,36 @@ void STrack::multi_predict(
   auto [pred_means, pred_covs] = kalman_filter->multi_predict(multi_mean, multi_covariance);
 
   for (size_t i = 0; i < stracks.size(); ++i) {
+    // Increment frames without update counter
+    stracks[i]->frames_without_update_++;
+    
+    // Store original state for drift limiting
+    Eigen::Vector4d original_xyah = stracks[i]->mean_.head<4>();
+    
     stracks[i]->mean_ = pred_means[i];
     stracks[i]->covariance_ = pred_covs[i];
-    stracks[i]->_tlwh = xyah_to_tlwh(pred_means[i].head<4>());
+    
+    Eigen::Vector4d xyah = pred_means[i].head<4>();
+    
+    // Limit drift for non-tracked or tracks without recent updates
+    if (stracks[i]->state_ != TrackState::Tracked || stracks[i]->frames_without_update_ > 3) {
+      double aspect_ratio_change = std::abs(xyah(2) - original_xyah(2)) / original_xyah(2);
+      double height_change = std::abs(xyah(3) - original_xyah(3)) / original_xyah(3);
+      
+      if (aspect_ratio_change > 0.5) {
+        double sign = (xyah(2) > original_xyah(2)) ? 1.0 : -1.0;
+        xyah(2) = original_xyah(2) * (1.0 + sign * 0.5);
+        stracks[i]->mean_(2) = xyah(2);
+      }
+      
+      if (height_change > 1.0) {
+        double sign = (xyah(3) > original_xyah(3)) ? 1.0 : -1.0;
+        xyah(3) = original_xyah(3) * (1.0 + sign * 1.0);
+        stracks[i]->mean_(3) = xyah(3);
+      }
+    }
+    
+    stracks[i]->_tlwh = xyah_to_tlwh(xyah);
   }
 }
 
