@@ -108,6 +108,13 @@ private:
    */
   void reset();
 
+  /**
+   * @brief Check if tracker should be reset due to scene change
+   * @param detections_msg Current detections
+   * @return True if tracker should be reset
+   */
+  bool shouldResetTracker(const vision_msgs::msg::Detection2DArray & detections_msg);
+
   rclcpp::QoS input_qos_;
   rclcpp::QoS output_qos_;
   // ROS subscribers and publishers
@@ -122,11 +129,20 @@ private:
   int max_time_lost_;           // Maximum frames to keep lost tracks
   bool fuse_score_;             // Whether to fuse detection scores with IoU
 
+  // Scene change detection parameters
+  double scene_change_thresh_;         // Threshold for match ratio to detect scene change
+  int min_detections_for_reset_;       // Minimum detections required to consider reset
+  int frames_without_match_thresh_;    // Frames without good matches before reset
+
   // Tracker state
   std::vector<STrack> tracked_stracks_;
   std::vector<STrack> lost_stracks_;
   std::vector<STrack> removed_stracks_;
   int frame_id_;
+
+  // Scene change detection state
+  int frames_without_good_match_;      // Counter for frames without good matches
+  int last_detection_count_;           // Previous frame detection count
 
   // Kalman filter
   std::shared_ptr<KalmanFilterXYAH> kalman_filter_;

@@ -43,6 +43,15 @@ ByteTrackerNode::ByteTrackerNode(const rclcpp::NodeOptions & options)
   match_thresh_ = declare_parameter<double>("match_thresh", 0.8);
   max_time_lost_ = declare_parameter<int>("max_time_lost", 30);
   fuse_score_ = declare_parameter<bool>("fuse_score", true);
+  
+  // Scene change detection parameters
+  scene_change_thresh_ = declare_parameter<double>("scene_change_thresh", 0.5);
+  min_detections_for_reset_ = declare_parameter<int>("min_detections_for_reset", 1);
+  frames_without_match_thresh_ = declare_parameter<int>("frames_without_match_thresh", 5);
+  
+  // Initialize scene change detection variables
+  frames_without_good_match_ = 0;
+  last_detection_count_ = 0;
 
   // Initialize Kalman filter
   kalman_filter_ = std::make_shared<KalmanFilterXYAH>();
@@ -72,6 +81,12 @@ void ByteTrackerNode::detectionCallback(const vision_msgs::msg::Detection2DArray
 vision_msgs::msg::Detection2DArray ByteTrackerNode::update(
   const vision_msgs::msg::Detection2DArray & detections_msg)
 {
+  // Check for scene change and reset if needed BEFORE incrementing frame_id
+  if (shouldResetTracker(detections_msg)) {
+    RCLCPP_INFO(get_logger(), "Scene change detected, resetting tracker");
+    reset();
+  }
+  
   frame_id_++;
 
   // Separate detections by confidence
@@ -140,6 +155,19 @@ vision_msgs::msg::Detection2DArray ByteTrackerNode::update(
       track.re_activate(det, frame_id_, false);
       refind_stracks.push_back(track);
     }
+  }
+  
+  // Update scene change detection based on match quality
+  double match_ratio = strack_pool.empty() ? 1.0 : 
+                      static_cast<double>(matches.size()) / strack_pool.size();
+  
+  // Only count as poor match if we have existing tracks and few matches
+  if (match_ratio < scene_change_thresh_ && !strack_pool.empty() && strack_pool.size() > 2) {
+    frames_without_good_match_++;
+    RCLCPP_DEBUG(get_logger(), "Poor match ratio: %.2f (%zu matches / %zu tracks), consecutive poor frames: %d", 
+                match_ratio, matches.size(), strack_pool.size(), frames_without_good_match_);
+  } else {
+    frames_without_good_match_ = 0;
   }
 
   // Second association with low score detections
@@ -286,6 +314,60 @@ vision_msgs::msg::Detection2DArray ByteTrackerNode::update(
   return output_msg;
 }
 
+bool ByteTrackerNode::shouldResetTracker(
+  const vision_msgs::msg::Detection2DArray & detections_msg)
+{
+  // Don't reset on the first few frames
+  if (frame_id_ < 3) {
+    return false;
+  }
+  
+  // Count high-confidence detections
+  int current_detection_count = 0;
+  for (const auto & det : detections_msg.detections) {
+    double score = det.results.empty() ? 0.0 : det.results[0].hypothesis.score;
+    if (score >= track_high_thresh_) {
+      current_detection_count++;
+    }
+  }
+  
+  // If we have no detections, don't reset
+  if (current_detection_count == 0) {
+    return false;
+  }
+  
+  // If we have no existing tracks but have new detections, don't reset (normal startup)
+  if (tracked_stracks_.empty() && lost_stracks_.empty()) {
+    last_detection_count_ = current_detection_count;
+    return false;
+  }
+  
+  // Check for dramatic change in detection count (scene change indicator)
+  if (last_detection_count_ > 0) {
+    double count_ratio = static_cast<double>(current_detection_count) / last_detection_count_;
+    // If detection count changes dramatically (more than 3x increase or decrease to less than 1/3)
+    if (count_ratio > 3.0 || count_ratio < 0.33) {
+      RCLCPP_INFO(get_logger(), 
+        "Scene change detected: detection count changed from %d to %d (ratio=%.2f)", 
+        last_detection_count_, current_detection_count, count_ratio);
+      last_detection_count_ = current_detection_count;
+      return true;
+    }
+  }
+  
+  // Check if we have too many consecutive frames without good matches
+  if (frames_without_good_match_ > frames_without_match_thresh_) {
+    RCLCPP_INFO(get_logger(), 
+      "Scene change detected: %d frames without good matches", 
+      frames_without_good_match_);
+    last_detection_count_ = current_detection_count;
+    return true;
+  }
+  
+  last_detection_count_ = current_detection_count;
+  return false;
+}
+
 std::vector<STrack> ByteTrackerNode::init_track(
   const vision_msgs::msg::Detection2DArray & detections)
 {
@@ -416,7 +498,16 @@ void ByteTrackerNode::reset()
   lost_stracks_.clear();
   removed_stracks_.clear();
   frame_id_ = 0;
+  
+  // Reinitialize Kalman filter like Ultralytics implementation
+  kalman_filter_ = std::make_shared<KalmanFilterXYAH>();
+  
+  // Reset track ID counter
   STrack::reset_id();
+  
+  // Reset scene change detection variables
+  frames_without_good_match_ = 0;
+  last_detection_count_ = 0;
 }
 
 }  // namespace yolov8

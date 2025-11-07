@@ -73,7 +73,7 @@ public:
     timeout_seconds_(std::max<int>(declare_parameter<int>("timeout", 300), 0)),
     max_token_(std::max<int>(declare_parameter<int>("max_token", 0), 0)),
     vlm_sampling_rate_(std::max<double>(declare_parameter<double>("vlm_sampling_rate", 0.2), 0.01)),
-    track_id_("0"),
+    track_id_(""),  // Start with empty track_id to prevent publishing before VLM processing
     vlm_processing_(false),
     shutdown_requested_(false)
   {
@@ -413,15 +413,13 @@ private:
                         "Target class updated: '%s' -> '%s' (track_id cleared)",
                         desired_class_name_.c_str(), new_value.c_str());
             
-            // Cancel ongoing VLM processing and clear queue
+            // Clear pending VLM tasks
             {
               std::lock_guard<std::mutex> vlm_lock(vlm_queue_mutex_);
-              cancel_current_vlm_ = true;
-              // Clear pending VLM tasks
               while (!vlm_task_queue_.empty()) {
                 vlm_task_queue_.pop();
               }
-              RCLCPP_INFO(get_logger(), "Cancelled ongoing VLM requests and cleared queue");
+              RCLCPP_INFO(get_logger(), "Cleared VLM task queue");
             }
           }
         }
@@ -683,30 +681,14 @@ private:
     }
 
     // If we reach here, the track ID was not found in the current detections
-    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
-      "Track ID %s not found in current detections", current_track_id.c_str());
-
-    // Publish the best detection if track ID not found and assign -1 to indicate no tracking
+    // Clear the track_id and don't publish anything to avoid confusing downstream nodes
     {
       std::lock_guard<std::mutex> lock(track_id_mutex_);
-      track_id_ = "-1";
-      current_track_id = track_id_;
+      track_id_.clear();
     }
     
-    vision_msgs::msg::Detection2D detection_to_publish;
-    // pick the first detection as a fallback
-    if (!detections_msg->detections.empty()) {
-      detection_to_publish = detections_msg->detections[0];
-      if (detection_to_publish.header.stamp.nanosec == 0 && detection_to_publish.header.stamp.sec == 0) {
-        detection_to_publish.header = detections_msg->header;
-      }
-      detection_to_publish.id = current_track_id;
-      filtered_detection2_d_pub_->publish(detection_to_publish);
-      // RCLCPP_INFO(get_logger(), "Published fallback detection with track ID -1");
-      RCLCPP_INFO_THROTTLE(
-        get_logger(), *get_clock(), 5000,
-        "Published fallback detection with track ID -1");
-    }
+    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+      "Track ID %s not found in current detections, cleared track_id", current_track_id.c_str());
   }
 
   // collect the detections that match the desired class id
@@ -714,17 +696,18 @@ private:
     const vision_msgs::msg::Detection2DArray & detections_msg) const
   {
     std::vector<const vision_msgs::msg::Detection2D *> matching_class_detections;
-    std::vector<const vision_msgs::msg::Detection2D *> fallback_detections;
     matching_class_detections.reserve(detections_msg.detections.size());
-    fallback_detections.reserve(detections_msg.detections.size());
 
-    for (const auto & detection : detections_msg.detections) {
-      fallback_detections.push_back(&detection);
-
-      if (desired_class_id_.empty()) {
-        continue;
+    // If no specific class ID is desired, process all detections
+    if (desired_class_id_.empty()) {
+      for (const auto & detection : detections_msg.detections) {
+        matching_class_detections.push_back(&detection);
       }
+      return matching_class_detections;
+    }
 
+    // If a specific class ID is desired, only return detections with that class ID
+    for (const auto & detection : detections_msg.detections) {
       for (const auto & result : detection.results) {
         if (result.hypothesis.class_id == desired_class_id_) {
           matching_class_detections.push_back(&detection);
@@ -733,11 +716,9 @@ private:
       }
     }
 
-    if (!desired_class_id_.empty() && !matching_class_detections.empty()) {
-      return matching_class_detections;
-    }
-
-    return fallback_detections;
+    // Return matching detections (empty if no matches found)
+    // This prevents VLM processing when the desired class is not detected
+    return matching_class_detections;
   }
 
   // convert the detection to a region of interest
