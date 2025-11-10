@@ -489,11 +489,6 @@ private:
         continue;
       }
 
-      // Debug: Display cropped image
-      // cv::resize(cropped, cropped, cv::Size(240, 640), 0, 0, cv::INTER_LINEAR);
-      // cv::imshow("Debug Image " + detection_ptr->id, cropped);
-      // cv::waitKey(1);
-
       std::vector<unsigned char> buffer;
       if (!cv::imencode(".jpg", cropped, buffer)) {
         RCLCPP_ERROR_THROTTLE(
