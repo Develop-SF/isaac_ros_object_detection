@@ -1,27 +1,17 @@
-// SPDX-FileCopyrightText: NVIDIA CORPORATION & AFFILIATES
-// Copyright (c) 2023-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-//
-// SPDX-License-Identifier: Apache-2.0
+/*
+ * Filename: /home/shinfang-ovx/workspaces/wy/isaac_ros_ws/src/isaac_ros_object_detection/isaac_ros_yolov8/src/byte_tracker_node.cpp
+ * Path: /home/shinfang-ovx/workspaces/wy/isaac_ros_ws/src/isaac_ros_object_detection/isaac_ros_yolov8/src/byte_tracker_node.cpp
+ * Created Date: Monday, November 3rd 2025, 11:03:24 am
+ * Author: Wen-Yu Chien
+ * Description: ByteTrack Node for multi-object tracking
+ * Copyright (c) 2025 Copyright (c) 2025 Shinfang Global
+ */
 
 #include "isaac_ros_yolov8/byte_tracker_node.hpp"
 #include "isaac_ros_yolov8/matching.hpp"
-#include "isaac_ros_common/qos.hpp"
-
+#include <rclcpp_components/register_node_macro.hpp>
 #include <algorithm>
 #include <set>
-#include <unordered_set>
 
 namespace nvidia
 {
@@ -30,422 +20,82 @@ namespace isaac_ros
 namespace yolov8
 {
 
-ByteTrackerNode::ByteTrackerNode(const rclcpp::NodeOptions & options)
-: Node("byte_tracker_node", options),
-  input_qos_(::isaac_ros::common::AddQosParameter(*this, "DEFAULT", "input_qos")),
-  output_qos_(::isaac_ros::common::AddQosParameter(*this, "DEFAULT", "output_qos")),
-  frame_id_(0)
+// BYTETracker implementation
+BYTETracker::BYTETracker(
+  float track_high_thresh,
+  float track_low_thresh,
+  float new_track_thresh,
+  int track_buffer,
+  float match_thresh,
+  bool fuse_score,
+  int frame_rate)
+: frame_id_(0),
+  max_time_lost_(static_cast<int>(frame_rate / 30.0 * track_buffer)),
+  track_high_thresh_(track_high_thresh),
+  track_low_thresh_(track_low_thresh),
+  new_track_thresh_(new_track_thresh),
+  match_thresh_(match_thresh),
+  fuse_score_(fuse_score)
 {
-  // Declare parameters
-  track_high_thresh_ = declare_parameter<double>("track_high_thresh", 0.6);
-  track_low_thresh_ = declare_parameter<double>("track_low_thresh", 0.1);
-  new_track_thresh_ = declare_parameter<double>("new_track_thresh", 0.7);
-  match_thresh_ = declare_parameter<double>("match_thresh", 0.8);
-  max_time_lost_ = declare_parameter<int>("max_time_lost", 30);
-  fuse_score_ = declare_parameter<bool>("fuse_score", true);
-  
-  // Scene change detection parameters
-  scene_change_thresh_ = declare_parameter<double>("scene_change_thresh", 0.5);
-  min_detections_for_reset_ = declare_parameter<int>("min_detections_for_reset", 1);
-  frames_without_match_thresh_ = declare_parameter<int>("frames_without_match_thresh", 5);
-  
-  // Initialize scene change detection variables
-  frames_without_good_match_ = 0;
-  last_detection_count_ = 0;
-
-  // Initialize Kalman filter
-  kalman_filter_ = std::make_shared<KalmanFilterXYAH>();
-
-  // Create subscriber and publisher
-  detection_sub_ = create_subscription<vision_msgs::msg::Detection2DArray>(
-    "detections_input", input_qos_,
-    std::bind(&ByteTrackerNode::detectionCallback, this, std::placeholders::_1));
-
-  tracked_pub_ = create_publisher<vision_msgs::msg::Detection2DArray>("tracked_detections", output_qos_);
-
-  RCLCPP_INFO(
-    get_logger(),
-    "ByteTracker initialized with track_high_thresh=%.2f, track_low_thresh=%.2f, "
-    "new_track_thresh=%.2f, match_thresh=%.2f, max_time_lost=%d",
-    track_high_thresh_, track_low_thresh_, new_track_thresh_, match_thresh_, max_time_lost_);
+  BaseTrack::reset_id();
 }
 
-ByteTrackerNode::~ByteTrackerNode() = default;
-
-void ByteTrackerNode::detectionCallback(const vision_msgs::msg::Detection2DArray::SharedPtr msg)
+std::vector<std::shared_ptr<STrack>> BYTETracker::init_track(
+  const std::vector<std::vector<float>> & detections)
 {
-  auto tracked_msg = update(*msg);
-  tracked_pub_->publish(tracked_msg);
-}
-
-vision_msgs::msg::Detection2DArray ByteTrackerNode::update(
-  const vision_msgs::msg::Detection2DArray & detections_msg)
-{
-  // Check for scene change and reset if needed BEFORE incrementing frame_id
-  if (shouldResetTracker(detections_msg)) {
-    RCLCPP_INFO(get_logger(), "Scene change detected, resetting tracker");
-    reset();
-  }
-  
-  frame_id_++;
-
-  // Separate detections by confidence
-  vision_msgs::msg::Detection2DArray high_detections;
-  vision_msgs::msg::Detection2DArray low_detections;
-
-  for (const auto & det : detections_msg.detections) {
-    double score = det.results.empty() ? 0.0 : det.results[0].hypothesis.score;
-    if (score >= track_high_thresh_) {
-      high_detections.detections.push_back(det);
-    } else if (score >= track_low_thresh_) {
-      low_detections.detections.push_back(det);
-    }
-  }
-
-  // Initialize tracks from detections
-  std::vector<STrack> detections = init_track(high_detections);
-  std::vector<STrack> detections_second = init_track(low_detections);
-
-  // Separate tracked and unconfirmed tracks
-  std::vector<STrack> unconfirmed;
-  std::vector<STrack> tracked_stracks;
-
-  for (auto & track : tracked_stracks_) {
-    if (!track.is_activated()) {
-      unconfirmed.push_back(track);
-    } else {
-      tracked_stracks.push_back(track);
-    }
-  }
-
-  // Combine tracked and lost tracks for matching
-  std::vector<STrack> strack_pool = joint_stracks(tracked_stracks, lost_stracks_);
-
-  // Predict current locations with Kalman filter
-  std::vector<STrack *> strack_pool_ptrs;
-  for (auto & track : strack_pool) {
-    strack_pool_ptrs.push_back(&track);
-  }
-  STrack::multi_predict(strack_pool_ptrs, kalman_filter_);
-
-  // First association with high score detections
-  std::vector<STrack *> detections_ptrs;
-  for (auto & det : detections) {
-    detections_ptrs.push_back(&det);
-  }
-
-  Eigen::MatrixXd dists = get_dists(strack_pool_ptrs, detections_ptrs);
-  auto [matches, u_track, u_detection] = 
-    matching::linear_assignment(dists, match_thresh_);
-
-  std::vector<STrack> activated_stracks;
-  std::vector<STrack> refind_stracks;
-  std::vector<STrack> lost_stracks;
-  std::vector<STrack> removed_stracks;
-
-  // Update matched tracks
-  for (const auto & [itracked, idet] : matches) {
-    STrack & track = strack_pool[itracked];
-    STrack & det = detections[idet];
-    
-    if (track.state() == TrackState::Tracked) {
-      track.update(det, frame_id_);
-      activated_stracks.push_back(track);
-    } else {
-      track.re_activate(det, frame_id_, false);
-      refind_stracks.push_back(track);
-    }
-  }
-  
-  // Update scene change detection based on match quality
-  double match_ratio = strack_pool.empty() ? 1.0 : 
-                      static_cast<double>(matches.size()) / strack_pool.size();
-  
-  // Only count as poor match if we have existing tracks and few matches
-  if (match_ratio < scene_change_thresh_ && !strack_pool.empty() && strack_pool.size() > 2) {
-    frames_without_good_match_++;
-    RCLCPP_DEBUG(get_logger(), "Poor match ratio: %.2f (%zu matches / %zu tracks), consecutive poor frames: %d", 
-                match_ratio, matches.size(), strack_pool.size(), frames_without_good_match_);
-  } else {
-    frames_without_good_match_ = 0;
-  }
-
-  // Second association with low score detections
-  std::vector<STrack> r_tracked_stracks;
-  for (int i : u_track) {
-    if (strack_pool[i].state() == TrackState::Tracked) {
-      r_tracked_stracks.push_back(strack_pool[i]);
-    }
-  }
-
-  std::vector<STrack *> r_tracked_ptrs;
-  for (auto & track : r_tracked_stracks) {
-    r_tracked_ptrs.push_back(&track);
-  }
-
-  std::vector<STrack *> detections_second_ptrs;
-  for (auto & det : detections_second) {
-    detections_second_ptrs.push_back(&det);
-  }
-
-  Eigen::MatrixXd dists_second = matching::iou_distance(r_tracked_ptrs, detections_second_ptrs);
-  
-  // Use adaptive threshold based on how long tracks have been without updates
-  // Tracks that have been drifting longer require higher IoU to match
-  double adaptive_thresh = 0.5;
-  for (const auto & track : r_tracked_stracks) {
-    if (track.frames_without_update() > 5) {
-      adaptive_thresh = std::min(adaptive_thresh, 0.7);  // Require higher IoU for drifting tracks
-    }
-  }
-  
-  auto [matches_second, u_track_second, u_detection_second] = 
-    matching::linear_assignment(dists_second, adaptive_thresh);
-
-  for (const auto & [itracked, idet] : matches_second) {
-    STrack & track = r_tracked_stracks[itracked];
-    STrack & det = detections_second[idet];
-    
-    if (track.state() == TrackState::Tracked) {
-      track.update(det, frame_id_);
-      activated_stracks.push_back(track);
-    } else {
-      track.re_activate(det, frame_id_, false);
-      refind_stracks.push_back(track);
-    }
-  }
-
-  // Mark unmatched tracked as lost
-  for (int it : u_track_second) {
-    STrack & track = r_tracked_stracks[it];
-    if (track.state() != TrackState::Lost) {
-      track.mark_lost();
-      lost_stracks.push_back(track);
-    }
-  }
-  
-  // Also mark any remaining unmatched tracks from first association as lost
-  for (int it : u_track) {
-    if (strack_pool[it].state() == TrackState::Tracked) {
-      strack_pool[it].mark_lost();
-      lost_stracks.push_back(strack_pool[it]);
-    }
-  }
-
-  // Deal with unconfirmed tracks
-  std::vector<STrack> detections_remain;
-  for (int i : u_detection) {
-    detections_remain.push_back(detections[i]);
-  }
-
-  std::vector<STrack *> unconfirmed_ptrs;
-  for (auto & track : unconfirmed) {
-    unconfirmed_ptrs.push_back(&track);
-  }
-
-  std::vector<STrack *> detections_remain_ptrs;
-  for (auto & det : detections_remain) {
-    detections_remain_ptrs.push_back(&det);
-  }
-
-  Eigen::MatrixXd dists_unconf = get_dists(unconfirmed_ptrs, detections_remain_ptrs);
-  auto [matches_unconf, u_unconfirmed, u_detection_remain] = 
-    matching::linear_assignment(dists_unconf, 0.7);
-
-  for (const auto & [itracked, idet] : matches_unconf) {
-    unconfirmed[itracked].update(detections_remain[idet], frame_id_);
-    activated_stracks.push_back(unconfirmed[itracked]);
-  }
-
-  for (int it : u_unconfirmed) {
-    STrack & track = unconfirmed[it];
-    track.mark_removed();
-    removed_stracks.push_back(track);
-  }
-
-  // Initialize new tracks
-  for (int inew : u_detection_remain) {
-    STrack & track = detections_remain[inew];
-    if (track.score() < new_track_thresh_) {
+  std::vector<std::shared_ptr<STrack>> tracks;
+  for (const auto & det : detections) {
+    // Detection format: [x1, y1, x2, y2, score, class_id]
+    if (det.size() < 6) {
       continue;
     }
-    track.activate(kalman_filter_, frame_id_);
-    activated_stracks.push_back(track);
-  }
 
-  // Update state: remove tracks that have been lost for too long
-  for (auto & track : lost_stracks_) {
-    if (frame_id_ - track.end_frame() > max_time_lost_) {
-      track.mark_removed();
-      removed_stracks.push_back(track);
-    }
-  }
-  
-  // Also remove tracks that have been without measurement updates for too long
-  // This helps prevent tracks from drifting indefinitely
-  std::vector<STrack> tracks_to_remove;
-  for (auto & track : tracked_stracks_) {
-    if (track.frames_without_update() > 10) {  // Remove tracks without updates for 10+ frames
-      RCLCPP_DEBUG(get_logger(), "Removing track %d due to %d frames without updates", 
-                   track.track_id(), track.frames_without_update());
-      track.mark_removed();
-      tracks_to_remove.push_back(track);
-    }
-  }
-  
-  for (const auto & track : tracks_to_remove) {
-    removed_stracks.push_back(track);
-  }
+    // Convert xyxy to xywh
+    float x1 = det[0];
+    float y1 = det[1];
+    float x2 = det[2];
+    float y2 = det[3];
+    float score = det[4];
+    int cls = static_cast<int>(det[5]);
 
-  // Update internal state
-  std::vector<STrack> tracked_stracks_keep;
-  for (const auto & track : tracked_stracks_) {
-    if (track.state() == TrackState::Tracked) {
-      tracked_stracks_keep.push_back(track);
-    }
-  }
+    float cx = (x1 + x2) / 2.0f;
+    float cy = (y1 + y2) / 2.0f;
+    float w = x2 - x1;
+    float h = y2 - y1;
 
-  tracked_stracks_ = joint_stracks(tracked_stracks_keep, activated_stracks);
-  tracked_stracks_ = joint_stracks(tracked_stracks_, refind_stracks);
-  lost_stracks_ = sub_stracks(lost_stracks_, tracked_stracks_);
-  
-  for (const auto & track : lost_stracks) {
-    lost_stracks_.push_back(track);
+    std::vector<float> xywh = {cx, cy, w, h};
+    tracks.push_back(
+      std::make_shared<STrack>(xywh, score, cls, static_cast<int>(tracks.size())));
   }
-  
-  lost_stracks_ = sub_stracks(lost_stracks_, removed_stracks_);
-  
-  auto [tracked_clean, lost_clean] = remove_duplicate_stracks(tracked_stracks_, lost_stracks_);
-  tracked_stracks_ = tracked_clean;
-  lost_stracks_ = lost_clean;
-
-  for (const auto & track : removed_stracks) {
-    removed_stracks_.push_back(track);
-  }
-
-  // Limit removed_stracks size
-  if (removed_stracks_.size() > 1000) {
-    removed_stracks_.erase(
-      removed_stracks_.begin(),
-      removed_stracks_.begin() + (removed_stracks_.size() - 999));
-  }
-
-  // Create output message
-  vision_msgs::msg::Detection2DArray output_msg;
-  output_msg.header = detections_msg.header;
-
-  for (const auto & track : tracked_stracks_) {
-    if (track.is_activated()) {
-      output_msg.detections.push_back(track.to_detection());
-    }
-  }
-
-  RCLCPP_DEBUG(
-    get_logger(),
-    "Frame %d: %zu tracked, %zu lost, %zu removed",
-    frame_id_, tracked_stracks_.size(), lost_stracks_.size(), removed_stracks_.size());
-
-  return output_msg;
-}
-
-bool ByteTrackerNode::shouldResetTracker(
-  const vision_msgs::msg::Detection2DArray & detections_msg)
-{
-  // Don't reset on the first few frames
-  if (frame_id_ < 3) {
-    return false;
-  }
-  
-  // Count high-confidence detections
-  int current_detection_count = 0;
-  for (const auto & det : detections_msg.detections) {
-    double score = det.results.empty() ? 0.0 : det.results[0].hypothesis.score;
-    if (score >= track_high_thresh_) {
-      current_detection_count++;
-    }
-  }
-  
-  // If we have no detections, don't reset
-  if (current_detection_count == 0) {
-    return false;
-  }
-  
-  // If we have no existing tracks but have new detections, don't reset (normal startup)
-  if (tracked_stracks_.empty() && lost_stracks_.empty()) {
-    last_detection_count_ = current_detection_count;
-    return false;
-  }
-  
-  // Check for dramatic change in detection count (scene change indicator)
-  // Use stricter thresholds to avoid false positives from normal detection variance
-  if (last_detection_count_ > 0) {
-    double count_ratio = static_cast<double>(current_detection_count) / last_detection_count_;
-    // Require both: (1) dramatic ratio change (5x or 1/5), AND (2) significant absolute change (>3 detections)
-    int count_diff = std::abs(current_detection_count - last_detection_count_);
-    if ((count_ratio > 5.0 || count_ratio < 0.2) && count_diff > 3) {
-      RCLCPP_INFO(get_logger(), 
-        "Scene change detected: detection count changed from %d to %d (ratio=%.2f, diff=%d)", 
-        last_detection_count_, current_detection_count, count_ratio, count_diff);
-      last_detection_count_ = current_detection_count;
-      return true;
-    }
-  }
-  
-  // Check if we have too many consecutive frames without good matches
-  if (frames_without_good_match_ > frames_without_match_thresh_) {
-    RCLCPP_INFO(get_logger(), 
-      "Scene change detected: %d frames without good matches", 
-      frames_without_good_match_);
-    last_detection_count_ = current_detection_count;
-    return true;
-  }
-  
-  last_detection_count_ = current_detection_count;
-  return false;
-}
-
-std::vector<STrack> ByteTrackerNode::init_track(
-  const vision_msgs::msg::Detection2DArray & detections)
-{
-  std::vector<STrack> tracks;
-  tracks.reserve(detections.detections.size());
-
-  for (const auto & det : detections.detections) {
-    tracks.emplace_back(det);
-  }
-
   return tracks;
 }
 
-Eigen::MatrixXd ByteTrackerNode::get_dists(
-  const std::vector<STrack *> & tracks,
-  const std::vector<STrack *> & detections)
+Eigen::MatrixXf BYTETracker::get_dists(
+  std::vector<STrack *> & tracks,
+  std::vector<STrack *> & detections)
 {
-  Eigen::MatrixXd dists = matching::iou_distance(tracks, detections);
-  
+  Eigen::MatrixXf dists = matching::iou_distance(tracks, detections);
   if (fuse_score_) {
     dists = matching::fuse_score(dists, detections);
   }
-  
   return dists;
 }
 
-std::vector<STrack> ByteTrackerNode::joint_stracks(
-  const std::vector<STrack> & tlista,
-  const std::vector<STrack> & tlistb)
+std::vector<std::shared_ptr<STrack>> BYTETracker::joint_stracks(
+  const std::vector<std::shared_ptr<STrack>> & tlista,
+  const std::vector<std::shared_ptr<STrack>> & tlistb)
 {
-  std::unordered_set<int> exists;
-  std::vector<STrack> res;
-  res.reserve(tlista.size() + tlistb.size());
+  std::set<int> exists;
+  std::vector<std::shared_ptr<STrack>> res;
 
   for (const auto & t : tlista) {
-    exists.insert(t.track_id());
+    exists.insert(t->track_id);
     res.push_back(t);
   }
 
   for (const auto & t : tlistb) {
-    if (exists.find(t.track_id()) == exists.end()) {
-      exists.insert(t.track_id());
+    if (exists.find(t->track_id) == exists.end()) {
+      exists.insert(t->track_id);
       res.push_back(t);
     }
   }
@@ -453,20 +103,18 @@ std::vector<STrack> ByteTrackerNode::joint_stracks(
   return res;
 }
 
-std::vector<STrack> ByteTrackerNode::sub_stracks(
-  const std::vector<STrack> & tlista,
-  const std::vector<STrack> & tlistb)
+std::vector<std::shared_ptr<STrack>> BYTETracker::sub_stracks(
+  const std::vector<std::shared_ptr<STrack>> & tlista,
+  const std::vector<std::shared_ptr<STrack>> & tlistb)
 {
-  std::unordered_set<int> track_ids_b;
+  std::set<int> track_ids_b;
   for (const auto & t : tlistb) {
-    track_ids_b.insert(t.track_id());
+    track_ids_b.insert(t->track_id);
   }
 
-  std::vector<STrack> res;
-  res.reserve(tlista.size());
-
+  std::vector<std::shared_ptr<STrack>> res;
   for (const auto & t : tlista) {
-    if (track_ids_b.find(t.track_id()) == track_ids_b.end()) {
+    if (track_ids_b.find(t->track_id) == track_ids_b.end()) {
       res.push_back(t);
     }
   }
@@ -474,82 +122,352 @@ std::vector<STrack> ByteTrackerNode::sub_stracks(
   return res;
 }
 
-std::pair<std::vector<STrack>, std::vector<STrack>> ByteTrackerNode::remove_duplicate_stracks(
-  const std::vector<STrack> & stracksa,
-  const std::vector<STrack> & stracksb)
+std::pair<std::vector<std::shared_ptr<STrack>>, std::vector<std::shared_ptr<STrack>>>
+BYTETracker::remove_duplicate_stracks(
+  const std::vector<std::shared_ptr<STrack>> & stracksa,
+  const std::vector<std::shared_ptr<STrack>> & stracksb)
 {
-  std::vector<STrack *> ptrs_a;
-  std::vector<STrack *> ptrs_b;
-  std::vector<STrack> copy_a = stracksa;
-  std::vector<STrack> copy_b = stracksb;
-
-  for (auto & t : copy_a) {
-    ptrs_a.push_back(&t);
+  std::vector<STrack *> a_ptrs, b_ptrs;
+  for (const auto & t : stracksa) {
+    a_ptrs.push_back(t.get());
   }
-  for (auto & t : copy_b) {
-    ptrs_b.push_back(&t);
+  for (const auto & t : stracksb) {
+    b_ptrs.push_back(t.get());
   }
 
-  Eigen::MatrixXd pdist = matching::iou_distance(ptrs_a, ptrs_b);
+  Eigen::MatrixXf pdist = matching::iou_distance(a_ptrs, b_ptrs);
 
-  std::set<int> dupa;
-  std::set<int> dupb;
-
-  for (int p = 0; p < pdist.rows(); ++p) {
-    for (int q = 0; q < pdist.cols(); ++q) {
-      if (pdist(p, q) < 0.15) {
-        int timep = stracksa[p].frame_id() - stracksa[p].start_frame();
-        int timeq = stracksb[q].frame_id() - stracksb[q].start_frame();
-        
+  std::set<int> dupa, dupb;
+  for (int i = 0; i < pdist.rows(); ++i) {
+    for (int j = 0; j < pdist.cols(); ++j) {
+      if (pdist(i, j) < 0.15f) {
+        int timep = stracksa[i]->frame_id - stracksa[i]->start_frame;
+        int timeq = stracksb[j]->frame_id - stracksb[j]->start_frame;
         if (timep > timeq) {
-          dupb.insert(q);
+          dupb.insert(j);
         } else {
-          dupa.insert(p);
+          dupa.insert(i);
         }
       }
     }
   }
 
-  std::vector<STrack> resa;
-  std::vector<STrack> resb;
-
+  std::vector<std::shared_ptr<STrack>> resa, resb;
   for (size_t i = 0; i < stracksa.size(); ++i) {
     if (dupa.find(i) == dupa.end()) {
       resa.push_back(stracksa[i]);
     }
   }
-
-  for (size_t i = 0; i < stracksb.size(); ++i) {
-    if (dupb.find(i) == dupb.end()) {
-      resb.push_back(stracksb[i]);
+  for (size_t j = 0; j < stracksb.size(); ++j) {
+    if (dupb.find(j) == dupb.end()) {
+      resb.push_back(stracksb[j]);
     }
   }
 
   return {resa, resb};
 }
 
-void ByteTrackerNode::reset()
+std::vector<std::vector<float>> BYTETracker::update(
+  const std::vector<std::vector<float>> & detections)
+{
+  frame_id_++;
+
+  std::vector<std::shared_ptr<STrack>> activated_stracks;
+  std::vector<std::shared_ptr<STrack>> refind_stracks;
+  std::vector<std::shared_ptr<STrack>> lost_stracks;
+  std::vector<std::shared_ptr<STrack>> removed_stracks;
+
+  // Split detections by confidence threshold
+  std::vector<std::vector<float>> detections_high, detections_low;
+  for (const auto & det : detections) {
+    if (det.size() < 6) {continue;}
+    float score = det[4];
+    if (score >= track_high_thresh_) {
+      detections_high.push_back(det);
+    } else if (score > track_low_thresh_ && score < track_high_thresh_) {
+      detections_low.push_back(det);
+    }
+  }
+
+  // Initialize tracks from detections
+  auto detections_first = init_track(detections_high);
+  auto detections_second = init_track(detections_low);
+
+  // Separate tracked and unconfirmed tracks
+  std::vector<std::shared_ptr<STrack>> unconfirmed;
+  std::vector<std::shared_ptr<STrack>> tracked_stracks;
+  for (auto & track : tracked_stracks_) {
+    if (!track->is_activated) {
+      unconfirmed.push_back(track);
+    } else {
+      tracked_stracks.push_back(track);
+    }
+  }
+
+  // Step 2: First association with high score detections
+  auto strack_pool = joint_stracks(tracked_stracks, lost_stracks_);
+
+  // Predict current locations
+  std::vector<STrack *> strack_pool_ptrs;
+  for (auto & t : strack_pool) {
+    strack_pool_ptrs.push_back(t.get());
+  }
+  STrack::multi_predict(strack_pool_ptrs, kalman_filter_);
+
+  std::vector<STrack *> detections_first_ptrs;
+  for (auto & t : detections_first) {
+    detections_first_ptrs.push_back(t.get());
+  }
+
+  Eigen::MatrixXf dists = get_dists(strack_pool_ptrs, detections_first_ptrs);
+  auto [matches, u_track, u_detection] = matching::linear_assignment(dists, match_thresh_);
+
+  for (const auto & [itracked, idet] : matches) {
+    auto & track = strack_pool[itracked];
+    auto & det = detections_first[idet];
+    if (track->state == TrackState::Tracked) {
+      track->update(*det, frame_id_);
+      activated_stracks.push_back(track);
+    } else {
+      track->re_activate(*det, frame_id_, false);
+      refind_stracks.push_back(track);
+    }
+  }
+
+  // Step 3: Second association with low score detections
+  std::vector<std::shared_ptr<STrack>> r_tracked_stracks;
+  for (int i : u_track) {
+    if (strack_pool[i]->state == TrackState::Tracked) {
+      r_tracked_stracks.push_back(strack_pool[i]);
+    }
+  }
+
+  std::vector<STrack *> r_tracked_stracks_ptrs;
+  for (auto & t : r_tracked_stracks) {
+    r_tracked_stracks_ptrs.push_back(t.get());
+  }
+
+  std::vector<STrack *> detections_second_ptrs;
+  for (auto & t : detections_second) {
+    detections_second_ptrs.push_back(t.get());
+  }
+
+  Eigen::MatrixXf dists_second = matching::iou_distance(
+    r_tracked_stracks_ptrs,
+    detections_second_ptrs);
+  auto [matches2, u_track2, u_detection2] = matching::linear_assignment(dists_second, 0.5f);
+
+  for (const auto & [itracked, idet] : matches2) {
+    auto & track = r_tracked_stracks[itracked];
+    auto & det = detections_second[idet];
+    if (track->state == TrackState::Tracked) {
+      track->update(*det, frame_id_);
+      activated_stracks.push_back(track);
+    } else {
+      track->re_activate(*det, frame_id_, false);
+      refind_stracks.push_back(track);
+    }
+  }
+
+  for (int it : u_track2) {
+    auto & track = r_tracked_stracks[it];
+    if (track->state != TrackState::Lost) {
+      track->mark_lost();
+      lost_stracks.push_back(track);
+    }
+  }
+
+  // Deal with unconfirmed tracks
+  std::vector<std::shared_ptr<STrack>> detections_left;
+  for (int i : u_detection) {
+    detections_left.push_back(detections_first[i]);
+  }
+
+  std::vector<STrack *> unconfirmed_ptrs;
+  for (auto & t : unconfirmed) {
+    unconfirmed_ptrs.push_back(t.get());
+  }
+
+  std::vector<STrack *> detections_left_ptrs;
+  for (auto & t : detections_left) {
+    detections_left_ptrs.push_back(t.get());
+  }
+
+  Eigen::MatrixXf dists_unconf = get_dists(unconfirmed_ptrs, detections_left_ptrs);
+  auto [matches3, u_unconfirmed, u_detection3] = matching::linear_assignment(dists_unconf, 0.7f);
+
+  for (const auto & [itracked, idet] : matches3) {
+    unconfirmed[itracked]->update(*detections_left[idet], frame_id_);
+    activated_stracks.push_back(unconfirmed[itracked]);
+  }
+
+  for (int it : u_unconfirmed) {
+    auto & track = unconfirmed[it];
+    track->mark_removed();
+    removed_stracks.push_back(track);
+  }
+
+  // Step 4: Init new stracks
+  for (int inew : u_detection3) {
+    auto & track = detections_left[inew];
+    if (track->score < new_track_thresh_) {
+      continue;
+    }
+    track->activate(kalman_filter_, frame_id_);
+    activated_stracks.push_back(track);
+  }
+
+  // Step 5: Update state
+  for (auto & track : lost_stracks_) {
+    if (frame_id_ - track->end_frame > max_time_lost_) {
+      track->mark_removed();
+      removed_stracks.push_back(track);
+    }
+  }
+
+  tracked_stracks_ = sub_stracks(tracked_stracks_, removed_stracks);
+  tracked_stracks_ = joint_stracks(tracked_stracks_, activated_stracks);
+  tracked_stracks_ = joint_stracks(tracked_stracks_, refind_stracks);
+
+  lost_stracks_ = sub_stracks(lost_stracks_, tracked_stracks_);
+  lost_stracks_ = joint_stracks(lost_stracks_, lost_stracks);
+  lost_stracks_ = sub_stracks(lost_stracks_, removed_stracks);
+
+  auto [tracked_cleaned, lost_cleaned] = remove_duplicate_stracks(tracked_stracks_, lost_stracks_);
+  tracked_stracks_ = tracked_cleaned;
+  lost_stracks_ = lost_cleaned;
+
+  removed_stracks_.insert(removed_stracks_.end(), removed_stracks.begin(), removed_stracks.end());
+  if (removed_stracks_.size() > 1000) {
+    removed_stracks_.erase(
+      removed_stracks_.begin(),
+      removed_stracks_.begin() + (removed_stracks_.size() - 999));
+  }
+
+  // Return tracked results
+  std::vector<std::vector<float>> results;
+  for (const auto & track : tracked_stracks_) {
+    if (track->is_activated) {
+      results.push_back(track->result());
+    }
+  }
+
+  return results;
+}
+
+void BYTETracker::reset()
 {
   tracked_stracks_.clear();
   lost_stracks_.clear();
   removed_stracks_.clear();
   frame_id_ = 0;
-  
-  // Reinitialize Kalman filter like Ultralytics implementation
-  kalman_filter_ = std::make_shared<KalmanFilterXYAH>();
-  
-  // Reset track ID counter
-  STrack::reset_id();
-  
-  // Reset scene change detection variables
-  frames_without_good_match_ = 0;
-  last_detection_count_ = 0;
+  BaseTrack::reset_id();
+}
+
+// ByteTrackerNode implementation
+ByteTrackerNode::ByteTrackerNode(const rclcpp::NodeOptions & options)
+: Node("byte_tracker_node", options)
+{
+  // Declare parameters
+  track_high_thresh_ = this->declare_parameter<double>("track_high_thresh", 0.6);
+  track_low_thresh_ = this->declare_parameter<double>("track_low_thresh", 0.1);
+  new_track_thresh_ = this->declare_parameter<double>("new_track_thresh", 0.7);
+  track_buffer_ = this->declare_parameter<int>("track_buffer", 30);
+  match_thresh_ = this->declare_parameter<double>("match_thresh", 0.8);
+  fuse_score_ = this->declare_parameter<bool>("fuse_score", false);
+  frame_rate_ = this->declare_parameter<int>("frame_rate", 30);
+
+  // Initialize tracker
+  tracker_ = std::make_unique<BYTETracker>(
+    track_high_thresh_,
+    track_low_thresh_,
+    new_track_thresh_,
+    track_buffer_,
+    match_thresh_,
+    fuse_score_,
+    frame_rate_);
+
+  // Create subscriber and publisher
+  detections_sub_ = this->create_subscription<vision_msgs::msg::Detection2DArray>(
+    "detections_input", 10,
+    std::bind(&ByteTrackerNode::detections_callback, this, std::placeholders::_1));
+
+  tracked_detections_pub_ = this->create_publisher<vision_msgs::msg::Detection2DArray>(
+    "tracked_detections", 10);
+
+  RCLCPP_INFO(this->get_logger(), "ByteTrackerNode initialized");
+}
+
+void ByteTrackerNode::detections_callback(
+  const vision_msgs::msg::Detection2DArray::SharedPtr msg)
+{
+  // Convert detections to tracker format
+  std::vector<std::vector<float>> detections;
+  for (const auto & det : msg->detections) {
+    if (det.results.empty()) {
+      continue;
+    }
+
+    float x_center = det.bbox.center.position.x;
+    float y_center = det.bbox.center.position.y;
+    float width = det.bbox.size_x;
+    float height = det.bbox.size_y;
+
+    float x1 = x_center - width / 2.0f;
+    float y1 = y_center - height / 2.0f;
+    float x2 = x_center + width / 2.0f;
+    float y2 = y_center + height / 2.0f;
+
+    float score = det.results[0].hypothesis.score;
+    float class_id = std::stof(det.results[0].hypothesis.class_id);
+
+    detections.push_back({x1, y1, x2, y2, score, class_id});
+  }
+
+  // Update tracker
+  auto tracked_results = tracker_->update(detections);
+
+  // Convert results back to Detection2DArray
+  auto tracked_msg = std::make_unique<vision_msgs::msg::Detection2DArray>();
+  tracked_msg->header = msg->header;
+
+  for (const auto & result : tracked_results) {
+    // Result format: [x1, y1, x2, y2, track_id, score, class_id, idx]
+    if (result.size() < 8) {
+      continue;
+    }
+
+    vision_msgs::msg::Detection2D detection;
+    detection.header = msg->header;
+
+    float x1 = result[0];
+    float y1 = result[1];
+    float x2 = result[2];
+    float y2 = result[3];
+    int track_id = static_cast<int>(result[4]);
+    float score = result[5];
+    int class_id = static_cast<int>(result[6]);
+
+    detection.bbox.center.position.x = (x1 + x2) / 2.0;
+    detection.bbox.center.position.y = (y1 + y2) / 2.0;
+    detection.bbox.size_x = x2 - x1;
+    detection.bbox.size_y = y2 - y1;
+
+    vision_msgs::msg::ObjectHypothesisWithPose hypothesis;
+    hypothesis.hypothesis.class_id = std::to_string(class_id);
+    hypothesis.hypothesis.score = score;
+
+    detection.results.push_back(hypothesis);
+    detection.id = std::to_string(track_id);
+
+    tracked_msg->detections.push_back(detection);
+  }
+
+  tracked_detections_pub_->publish(std::move(tracked_msg));
 }
 
 }  // namespace yolov8
 }  // namespace isaac_ros
 }  // namespace nvidia
 
-// Register as component
-#include "rclcpp_components/register_node_macro.hpp"
 RCLCPP_COMPONENTS_REGISTER_NODE(nvidia::isaac_ros::yolov8::ByteTrackerNode)

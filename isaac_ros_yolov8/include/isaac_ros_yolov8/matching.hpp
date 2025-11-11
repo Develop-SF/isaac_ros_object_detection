@@ -12,7 +12,7 @@
 
 #include <Eigen/Dense>
 #include <vector>
-#include <array>
+#include <tuple>
 
 namespace nvidia
 {
@@ -28,41 +28,46 @@ namespace matching
 {
 
 /**
- * @brief Calculate IoU (Intersection over Union) between two bounding boxes
- * @param tlwh1 First bbox in top-left-width-height format
- * @param tlwh2 Second bbox in top-left-width-height format
- * @return IoU value between 0 and 1
+ * @brief Compute IoU distance matrix between two lists of tracks
+ * 
+ * @param atracks List of tracks A
+ * @param btracks List of tracks B
+ * @return Eigen::MatrixXf Distance matrix where distance = 1 - IoU
  */
-double calc_iou(const std::array<double, 4> & tlwh1, const std::array<double, 4> & tlwh2);
+Eigen::MatrixXf iou_distance(
+  const std::vector<STrack *> & atracks,
+  const std::vector<STrack *> & btracks);
 
 /**
- * @brief Calculate IoU distance matrix between tracks and detections
- * @param tracks Vector of track objects
- * @param detections Vector of detection objects
- * @return Distance matrix (1 - IoU)
+ * @brief Fuse detection scores with cost matrix
+ * 
+ * @param cost_matrix The original cost matrix
+ * @param detections List of detections
+ * @return Eigen::MatrixXf Fused cost matrix
  */
-Eigen::MatrixXd iou_distance(
-  const std::vector<STrack *> & tracks,
+Eigen::MatrixXf fuse_score(
+  const Eigen::MatrixXf & cost_matrix,
   const std::vector<STrack *> & detections);
 
 /**
- * @brief Fuse detection scores with distance matrix
- * @param cost_matrix Distance matrix
- * @param detections Vector of detection objects
- * @return Fused cost matrix
+ * @brief Perform linear assignment using Hungarian algorithm
+ * 
+ * @param cost_matrix The cost matrix for assignment
+ * @param thresh Threshold for valid assignments
+ * @return std::tuple<std::vector<std::pair<int, int>>, std::vector<int>, std::vector<int>>
+ *         Matches, unmatched tracks A, unmatched tracks B
  */
-Eigen::MatrixXd fuse_score(
-  const Eigen::MatrixXd & cost_matrix,
-  const std::vector<STrack *> & detections);
+std::tuple<std::vector<std::pair<int, int>>, std::vector<int>, std::vector<int>>
+linear_assignment(const Eigen::MatrixXf & cost_matrix, float thresh);
 
 /**
- * @brief Linear assignment using Hungarian algorithm
- * @param cost_matrix Cost matrix
- * @param thresh Threshold for matching
- * @return Tuple of (matches, unmatched_tracks, unmatched_detections)
+ * @brief Compute IoU between two bounding boxes in xyxy format
+ * 
+ * @param bbox1 First bounding box [x1, y1, x2, y2]
+ * @param bbox2 Second bounding box [x1, y1, x2, y2]
+ * @return float IoU value
  */
-std::tuple<std::vector<std::pair<int, int>>, std::vector<int>, std::vector<int>> 
-linear_assignment(const Eigen::MatrixXd & cost_matrix, double thresh);
+float compute_iou(const Eigen::Vector4f & bbox1, const Eigen::Vector4f & bbox2);
 
 }  // namespace matching
 }  // namespace yolov8

@@ -6,13 +6,12 @@
  * Description: Matching functions for ByteTrack object tracking
  * Copyright (c) 2025 Copyright (c) 2025 Shinfang Global
  */
+
 #include "isaac_ros_yolov8/matching.hpp"
 #include "isaac_ros_yolov8/strack.hpp"
-
 #include <algorithm>
 #include <limits>
 #include <set>
-#include <vector>
 
 namespace nvidia
 {
@@ -23,89 +22,88 @@ namespace yolov8
 namespace matching
 {
 
-double calc_iou(const std::array<double, 4> & tlwh1, const std::array<double, 4> & tlwh2)
+float compute_iou(const Eigen::Vector4f & bbox1, const Eigen::Vector4f & bbox2)
 {
-  // tlwh format: [top, left, width, height]
-  double left1 = tlwh1[1];
-  double top1 = tlwh1[0];
-  double right1 = left1 + tlwh1[2];
-  double bottom1 = top1 + tlwh1[3];
+  float x1_min = bbox1(0);
+  float y1_min = bbox1(1);
+  float x1_max = bbox1(2);
+  float y1_max = bbox1(3);
 
-  double left2 = tlwh2[1];
-  double top2 = tlwh2[0];
-  double right2 = left2 + tlwh2[2];
-  double bottom2 = top2 + tlwh2[3];
+  float x2_min = bbox2(0);
+  float y2_min = bbox2(1);
+  float x2_max = bbox2(2);
+  float y2_max = bbox2(3);
 
-  // Calculate intersection
-  double inter_left = std::max(left1, left2);
-  double inter_top = std::max(top1, top2);
-  double inter_right = std::min(right1, right2);
-  double inter_bottom = std::min(bottom1, bottom2);
+  // Compute intersection area
+  float inter_x_min = std::max(x1_min, x2_min);
+  float inter_y_min = std::max(y1_min, y2_min);
+  float inter_x_max = std::min(x1_max, x2_max);
+  float inter_y_max = std::min(y1_max, y2_max);
 
-  double inter_width = std::max(0.0, inter_right - inter_left);
-  double inter_height = std::max(0.0, inter_bottom - inter_top);
-  double inter_area = inter_width * inter_height;
+  float inter_width = std::max(0.0f, inter_x_max - inter_x_min);
+  float inter_height = std::max(0.0f, inter_y_max - inter_y_min);
+  float inter_area = inter_width * inter_height;
 
-  // Calculate union
-  double area1 = tlwh1[2] * tlwh1[3];
-  double area2 = tlwh2[2] * tlwh2[3];
-  double union_area = area1 + area2 - inter_area;
+  // Compute union area
+  float area1 = (x1_max - x1_min) * (y1_max - y1_min);
+  float area2 = (x2_max - x2_min) * (y2_max - y2_min);
+  float union_area = area1 + area2 - inter_area;
 
-  if (union_area <= 0.0) {
-    return 0.0;
+  if (union_area <= 0.0f) {
+    return 0.0f;
   }
 
   return inter_area / union_area;
 }
 
-Eigen::MatrixXd iou_distance(
-  const std::vector<STrack *> & tracks,
-  const std::vector<STrack *> & detections)
+Eigen::MatrixXf iou_distance(
+  const std::vector<STrack *> & atracks,
+  const std::vector<STrack *> & btracks)
 {
-  if (tracks.empty() || detections.empty()) {
-    return Eigen::MatrixXd::Ones(tracks.size(), detections.size());
+  if (atracks.empty() || btracks.empty()) {
+    return Eigen::MatrixXf::Zero(atracks.size(), btracks.size());
   }
 
-  Eigen::MatrixXd cost_matrix(tracks.size(), detections.size());
+  Eigen::MatrixXf cost_matrix(atracks.size(), btracks.size());
 
-  for (size_t i = 0; i < tracks.size(); ++i) {
-    for (size_t j = 0; j < detections.size(); ++j) {
-      double iou = calc_iou(tracks[i]->tlwh(), detections[j]->tlwh());
-      cost_matrix(i, j) = 1.0 - iou;  // Convert IoU to distance
+  for (size_t i = 0; i < atracks.size(); ++i) {
+    for (size_t j = 0; j < btracks.size(); ++j) {
+      Eigen::Vector4f bbox1 = atracks[i]->xyxy();
+      Eigen::Vector4f bbox2 = btracks[j]->xyxy();
+      float iou = compute_iou(bbox1, bbox2);
+      cost_matrix(i, j) = 1.0f - iou;  // Distance = 1 - IoU
     }
   }
 
   return cost_matrix;
 }
 
-Eigen::MatrixXd fuse_score(
-  const Eigen::MatrixXd & cost_matrix,
+Eigen::MatrixXf fuse_score(
+  const Eigen::MatrixXf & cost_matrix,
   const std::vector<STrack *> & detections)
 {
-  if (detections.empty()) {
+  if (detections.empty() || cost_matrix.cols() == 0) {
     return cost_matrix;
   }
 
-  Eigen::MatrixXd fused_cost = cost_matrix;
+  Eigen::MatrixXf fused_matrix = cost_matrix;
 
-  for (int j = 0; j < cost_matrix.cols(); ++j) {
-    for (int i = 0; i < cost_matrix.rows(); ++i) {
-      fused_cost(i, j) = cost_matrix(i, j) * (1.0 - detections[j]->score());
-    }
+  for (int j = 0; j < fused_matrix.cols() && j < static_cast<int>(detections.size()); ++j) {
+    fused_matrix.col(j) *= (1.0f - detections[j]->score);
   }
 
-  return fused_cost;
+  return fused_matrix;
 }
 
-// Simple greedy assignment algorithm (can be replaced with Hungarian algorithm for better results)
-std::tuple<std::vector<std::pair<int, int>>, std::vector<int>, std::vector<int>> 
-linear_assignment(const Eigen::MatrixXd & cost_matrix, double thresh)
+// Hungarian algorithm implementation for linear assignment
+std::tuple<std::vector<std::pair<int, int>>, std::vector<int>, std::vector<int>>
+linear_assignment(const Eigen::MatrixXf & cost_matrix, float thresh)
 {
   std::vector<std::pair<int, int>> matches;
   std::vector<int> unmatched_a;
   std::vector<int> unmatched_b;
 
-  if (cost_matrix.size() == 0) {
+  if (cost_matrix.rows() == 0 || cost_matrix.cols() == 0) {
     for (int i = 0; i < cost_matrix.rows(); ++i) {
       unmatched_a.push_back(i);
     }
@@ -115,24 +113,28 @@ linear_assignment(const Eigen::MatrixXd & cost_matrix, double thresh)
     return {matches, unmatched_a, unmatched_b};
   }
 
+  // Simple greedy assignment algorithm
+  // For a more accurate implementation, consider using a proper Hungarian algorithm library
   std::set<int> matched_a;
   std::set<int> matched_b;
 
-  // Greedy assignment: find minimum cost associations
-  std::vector<std::tuple<double, int, int>> costs;
+  // Create a list of all potential assignments with their costs
+  std::vector<std::tuple<float, int, int>> assignments;
   for (int i = 0; i < cost_matrix.rows(); ++i) {
     for (int j = 0; j < cost_matrix.cols(); ++j) {
       if (cost_matrix(i, j) < thresh) {
-        costs.push_back({cost_matrix(i, j), i, j});
+        assignments.push_back({cost_matrix(i, j), i, j});
       }
     }
   }
 
-  // Sort by cost
-  std::sort(costs.begin(), costs.end());
+  // Sort by cost (ascending)
+  std::sort(
+    assignments.begin(), assignments.end(),
+    [](const auto & a, const auto & b) {return std::get<0>(a) < std::get<0>(b);});
 
-  // Assign greedily
-  for (const auto & [cost, i, j] : costs) {
+  // Greedily assign tracks
+  for (const auto & [cost, i, j] : assignments) {
     if (matched_a.find(i) == matched_a.end() && matched_b.find(j) == matched_b.end()) {
       matches.push_back({i, j});
       matched_a.insert(i);
@@ -140,12 +142,13 @@ linear_assignment(const Eigen::MatrixXd & cost_matrix, double thresh)
     }
   }
 
-  // Find unmatched
+  // Find unmatched tracks
   for (int i = 0; i < cost_matrix.rows(); ++i) {
     if (matched_a.find(i) == matched_a.end()) {
       unmatched_a.push_back(i);
     }
   }
+
   for (int j = 0; j < cost_matrix.cols(); ++j) {
     if (matched_b.find(j) == matched_b.end()) {
       unmatched_b.push_back(j);

@@ -11,7 +11,6 @@
 #define ISAAC_ROS_YOLOV8__KALMAN_FILTER_HPP_
 
 #include <Eigen/Dense>
-#include <utility>
 #include <vector>
 
 namespace nvidia
@@ -22,74 +21,87 @@ namespace yolov8
 {
 
 /**
- * @brief Kalman filter for tracking bounding boxes in image space using x-y-aspect-height representation
+ * @brief Kalman Filter for tracking bounding boxes in image space using XYAH representation
  * 
- * The state is represented as [x, y, a, h, vx, vy, va, vh] where:
- * - (x, y) is the center position
- * - a is the aspect ratio (width/height)
- * - h is the height
- * - vx, vy, va, vh are the respective velocities
+ * Implements a Kalman filter for tracking bounding boxes in image space. The 8-dimensional
+ * state space (x, y, a, h, vx, vy, va, vh) contains the bounding box center position (x, y),
+ * aspect ratio a, height h, and their respective velocities. Object motion follows a constant
+ * velocity model, and bounding box location (x, y, a, h) is taken as a direct observation
+ * of the state space (linear observation model).
  */
 class KalmanFilterXYAH
 {
 public:
+  using StateVector = Eigen::Matrix<float, 8, 1>;
+  using StateMatrix = Eigen::Matrix<float, 8, 8>;
+  using MeasurementVector = Eigen::Matrix<float, 4, 1>;
+  using MeasurementMatrix = Eigen::Matrix<float, 4, 4>;
+
+  /**
+   * @brief Construct a new Kalman Filter XYAH object
+   */
   KalmanFilterXYAH();
 
   /**
-   * @brief Initialize a new track from the first detection
-   * @param measurement Measurement vector [x, y, a, h]
-   * @return Pair of (mean state vector, covariance matrix)
+   * @brief Create a track from an unassociated measurement
+   * 
+   * @param measurement Bounding box coordinates (x, y, a, h) with center position (x, y),
+   *                   aspect ratio a, and height h
+   * @return std::pair<StateVector, StateMatrix> Mean vector and covariance matrix
    */
-  std::pair<Eigen::VectorXd, Eigen::MatrixXd> initiate(const Eigen::Vector4d & measurement);
+  std::pair<StateVector, StateMatrix> initiate(const MeasurementVector & measurement);
 
   /**
-   * @brief Predict the next state
-   * @param mean Current state mean vector
-   * @param covariance Current state covariance matrix
-   * @return Pair of (predicted mean, predicted covariance)
+   * @brief Run Kalman filter prediction step
+   * 
+   * @param mean The 8-dimensional mean vector of the object state at the previous time step
+   * @param covariance The 8x8 covariance matrix of the object state at the previous time step
+   * @return std::pair<StateVector, StateMatrix> Predicted mean and covariance
    */
-  std::pair<Eigen::VectorXd, Eigen::MatrixXd> predict(
-    const Eigen::VectorXd & mean,
-    const Eigen::MatrixXd & covariance);
-
-  /**
-   * @brief Update the state with a new measurement
-   * @param mean Current state mean vector
-   * @param covariance Current state covariance matrix
-   * @param measurement New measurement [x, y, a, h]
-   * @return Pair of (updated mean, updated covariance)
-   */
-  std::pair<Eigen::VectorXd, Eigen::MatrixXd> update(
-    const Eigen::VectorXd & mean,
-    const Eigen::MatrixXd & covariance,
-    const Eigen::Vector4d & measurement);
+  std::pair<StateVector, StateMatrix> predict(
+    const StateVector & mean,
+    const StateMatrix & covariance);
 
   /**
    * @brief Project state distribution to measurement space
-   * @param mean State mean vector
-   * @param covariance State covariance matrix
-   * @return Pair of (projected mean, projected covariance)
+   * 
+   * @param mean The state's mean vector (8 dimensional)
+   * @param covariance The state's covariance matrix (8x8 dimensional)
+   * @return std::pair<MeasurementVector, MeasurementMatrix> Projected mean and covariance
    */
-  std::pair<Eigen::Vector4d, Eigen::Matrix4d> project(
-    const Eigen::VectorXd & mean,
-    const Eigen::MatrixXd & covariance);
+  std::pair<MeasurementVector, MeasurementMatrix> project(
+    const StateVector & mean,
+    const StateMatrix & covariance);
 
   /**
-   * @brief Predict multiple tracks in batch
-   * @param means Vector of state mean vectors
-   * @param covariances Vector of state covariance matrices
-   * @return Pair of (predicted means, predicted covariances)
+   * @brief Run Kalman filter prediction step (vectorized version)
+   * 
+   * @param means The Nx8 dimensional mean matrix of the object states
+   * @param covariances The Nx8x8 covariance matrix of the object states
+   * @return std::pair<std::vector<StateVector>, std::vector<StateMatrix>> Predicted means and covariances
    */
-  std::pair<std::vector<Eigen::VectorXd>, std::vector<Eigen::MatrixXd>> multi_predict(
-    const std::vector<Eigen::VectorXd> & means,
-    const std::vector<Eigen::MatrixXd> & covariances);
+  std::pair<std::vector<StateVector>, std::vector<StateMatrix>> multi_predict(
+    const std::vector<StateVector> & means,
+    const std::vector<StateMatrix> & covariances);
+
+  /**
+   * @brief Run Kalman filter correction step
+   * 
+   * @param mean The predicted state's mean vector (8 dimensional)
+   * @param covariance The state's covariance matrix (8x8 dimensional)
+   * @param measurement The 4 dimensional measurement vector (x, y, a, h)
+   * @return std::pair<StateVector, StateMatrix> Corrected mean and covariance
+   */
+  std::pair<StateVector, StateMatrix> update(
+    const StateVector & mean,
+    const StateMatrix & covariance,
+    const MeasurementVector & measurement);
 
 private:
-  double std_weight_position_;
-  double std_weight_velocity_;
-
-  Eigen::MatrixXd motion_mat_;   // State transition matrix
-  Eigen::MatrixXd update_mat_;   // Measurement function
+  Eigen::Matrix<float, 8, 8> motion_mat_;     ///< Motion matrix
+  Eigen::Matrix<float, 4, 8> update_mat_;     ///< Update matrix
+  float std_weight_position_;                  ///< Standard deviation weight for position
+  float std_weight_velocity_;                  ///< Standard deviation weight for velocity
 };
 
 }  // namespace yolov8

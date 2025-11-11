@@ -16,10 +16,9 @@
 
 #include "rclcpp/rclcpp.hpp"
 #include "vision_msgs/msg/detection2_d_array.hpp"
-#include "sensor_msgs/msg/image.hpp"
 
-#include "isaac_ros_yolov8/kalman_filter.hpp"
 #include "isaac_ros_yolov8/strack.hpp"
+#include "isaac_ros_yolov8/kalman_filter.hpp"
 
 namespace nvidia
 {
@@ -29,123 +28,157 @@ namespace yolov8
 {
 
 /**
- * @brief ByteTrack node for multi-object tracking
+ * @brief BYTETracker algorithm implementation
  * 
- * This node implements the ByteTrack algorithm for real-time multi-object tracking.
- * It subscribes to Detection2DArray messages and publishes tracked detections with
- * consistent IDs across frames.
+ * Implements the BYTETracker algorithm for multi-object tracking.
+ * Maintains tracked, lost, and removed tracks over frames.
+ */
+class BYTETracker
+{
+public:
+  /**
+   * @brief Construct a new BYTETracker object
+   * 
+   * @param track_high_thresh High threshold for track detection confidence
+   * @param track_low_thresh Low threshold for track detection confidence
+   * @param new_track_thresh Threshold for initializing new tracks
+   * @param track_buffer Number of frames to keep lost tracks
+   * @param match_thresh Matching threshold
+   * @param fuse_score Whether to fuse scores in matching
+   * @param frame_rate Frame rate of the video
+   */
+  BYTETracker(
+    float track_high_thresh = 0.6f,
+    float track_low_thresh = 0.1f,
+    float new_track_thresh = 0.7f,
+    int track_buffer = 30,
+    float match_thresh = 0.8f,
+    bool fuse_score = false,
+    int frame_rate = 30);
+
+  ~BYTETracker() = default;
+
+  /**
+   * @brief Update tracker with new detections
+   * 
+   * @param detections Detection results [x1, y1, x2, y2, score, class_id]
+   * @return std::vector<std::vector<float>> Tracked results
+   */
+  std::vector<std::vector<float>> update(const std::vector<std::vector<float>> & detections);
+
+  /**
+   * @brief Reset the tracker
+   */
+  void reset();
+
+private:
+  /**
+   * @brief Initialize tracks from detections
+   * 
+   * @param detections Detection results
+   * @return std::vector<std::shared_ptr<STrack>> List of initialized tracks
+   */
+  std::vector<std::shared_ptr<STrack>> init_track(
+    const std::vector<std::vector<float>> & detections);
+
+  /**
+   * @brief Get distance matrix between tracks and detections
+   * 
+   * @param tracks List of tracks
+   * @param detections List of detections
+   * @return Eigen::MatrixXf Distance matrix
+   */
+  Eigen::MatrixXf get_dists(
+    std::vector<STrack *> & tracks,
+    std::vector<STrack *> & detections);
+
+  /**
+   * @brief Joint two lists of tracks
+   * 
+   * @param tlista First list
+   * @param tlistb Second list
+   * @return std::vector<std::shared_ptr<STrack>> Combined list without duplicates
+   */
+  static std::vector<std::shared_ptr<STrack>> joint_stracks(
+    const std::vector<std::shared_ptr<STrack>> & tlista,
+    const std::vector<std::shared_ptr<STrack>> & tlistb);
+
+  /**
+   * @brief Subtract second list from first list
+   * 
+   * @param tlista First list
+   * @param tlistb Second list
+   * @return std::vector<std::shared_ptr<STrack>> Filtered list
+   */
+  static std::vector<std::shared_ptr<STrack>> sub_stracks(
+    const std::vector<std::shared_ptr<STrack>> & tlista,
+    const std::vector<std::shared_ptr<STrack>> & tlistb);
+
+  /**
+   * @brief Remove duplicate tracks
+   * 
+   * @param stracksa First list
+   * @param stracksb Second list
+   * @return std::pair<std::vector<std::shared_ptr<STrack>>, std::vector<std::shared_ptr<STrack>>>
+   *         Deduplicated lists
+   */
+  static std::pair<std::vector<std::shared_ptr<STrack>>, std::vector<std::shared_ptr<STrack>>>
+  remove_duplicate_stracks(
+    const std::vector<std::shared_ptr<STrack>> & stracksa,
+    const std::vector<std::shared_ptr<STrack>> & stracksb);
+
+  std::vector<std::shared_ptr<STrack>> tracked_stracks_;   ///< Successfully activated tracks
+  std::vector<std::shared_ptr<STrack>> lost_stracks_;      ///< Lost tracks
+  std::vector<std::shared_ptr<STrack>> removed_stracks_;   ///< Removed tracks
+
+  int frame_id_;                          ///< Current frame ID
+  int max_time_lost_;                     ///< Maximum frames for lost tracks
+  KalmanFilterXYAH kalman_filter_;        ///< Kalman filter instance
+
+  // Parameters
+  float track_high_thresh_;
+  float track_low_thresh_;
+  float new_track_thresh_;
+  float match_thresh_;
+  bool fuse_score_;
+};
+
+/**
+ * @brief ROS2 node for ByteTracker
+ * 
+ * Subscribes to Detection2DArray messages and publishes tracked detections
+ * with tracking IDs.
  */
 class ByteTrackerNode : public rclcpp::Node
 {
 public:
   explicit ByteTrackerNode(const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
-  ~ByteTrackerNode();
+
+  ~ByteTrackerNode() = default;
 
 private:
   /**
    * @brief Callback for detection messages
+   * 
    * @param msg Detection2DArray message
    */
-  void detectionCallback(const vision_msgs::msg::Detection2DArray::SharedPtr msg);
+  void detections_callback(const vision_msgs::msg::Detection2DArray::SharedPtr msg);
 
-  /**
-   * @brief Main tracking update step
-   * @param detections_msg Input detections
-   * @return Tracked detections
-   */
-  vision_msgs::msg::Detection2DArray update(
-    const vision_msgs::msg::Detection2DArray & detections_msg);
+  // Subscriber and publisher
+  rclcpp::Subscription<vision_msgs::msg::Detection2DArray>::SharedPtr detections_sub_;
+  rclcpp::Publisher<vision_msgs::msg::Detection2DArray>::SharedPtr tracked_detections_pub_;
 
-  /**
-   * @brief Initialize tracks from detections
-   * @param detections Input detections
-   * @return Vector of STrack objects
-   */
-  std::vector<STrack> init_track(const vision_msgs::msg::Detection2DArray & detections);
+  // ByteTracker instance
+  std::unique_ptr<BYTETracker> tracker_;
 
-  /**
-   * @brief Get distance matrix between tracks and detections
-   * @param tracks Vector of track pointers
-   * @param detections Vector of detection pointers
-   * @return Distance matrix
-   */
-  Eigen::MatrixXd get_dists(
-    const std::vector<STrack *> & tracks,
-    const std::vector<STrack *> & detections);
-
-  /**
-   * @brief Combine two track lists without duplicates
-   * @param tlista First track list
-   * @param tlistb Second track list
-   * @return Combined track list
-   */
-  static std::vector<STrack> joint_stracks(
-    const std::vector<STrack> & tlista,
-    const std::vector<STrack> & tlistb);
-
-  /**
-   * @brief Subtract tracks in tlistb from tlista
-   * @param tlista First track list
-   * @param tlistb Tracks to remove
-   * @return Filtered track list
-   */
-  static std::vector<STrack> sub_stracks(
-    const std::vector<STrack> & tlista,
-    const std::vector<STrack> & tlistb);
-
-  /**
-   * @brief Remove duplicate tracks based on IoU
-   * @param stracksa First track list
-   * @param stracksb Second track list
-   * @return Pair of filtered track lists
-   */
-  static std::pair<std::vector<STrack>, std::vector<STrack>> remove_duplicate_stracks(
-    const std::vector<STrack> & stracksa,
-    const std::vector<STrack> & stracksb);
-
-  /**
-   * @brief Reset tracker state
-   */
-  void reset();
-
-  /**
-   * @brief Check if tracker should be reset due to scene change
-   * @param detections_msg Current detections
-   * @return True if tracker should be reset
-   */
-  bool shouldResetTracker(const vision_msgs::msg::Detection2DArray & detections_msg);
-
-  rclcpp::QoS input_qos_;
-  rclcpp::QoS output_qos_;
-  // ROS subscribers and publishers
-  rclcpp::Subscription<vision_msgs::msg::Detection2DArray>::SharedPtr detection_sub_;
-  rclcpp::Publisher<vision_msgs::msg::Detection2DArray>::SharedPtr tracked_pub_;
-
-  // Tracker parameters
-  double track_high_thresh_;    // High confidence threshold for first association
-  double track_low_thresh_;     // Low confidence threshold for second association
-  double new_track_thresh_;     // Threshold for creating new tracks
-  double match_thresh_;         // IoU threshold for matching
-  int max_time_lost_;           // Maximum frames to keep lost tracks
-  bool fuse_score_;             // Whether to fuse detection scores with IoU
-
-  // Scene change detection parameters
-  double scene_change_thresh_;         // Threshold for match ratio to detect scene change
-  int min_detections_for_reset_;       // Minimum detections required to consider reset
-  int frames_without_match_thresh_;    // Frames without good matches before reset
-
-  // Tracker state
-  std::vector<STrack> tracked_stracks_;
-  std::vector<STrack> lost_stracks_;
-  std::vector<STrack> removed_stracks_;
-  int frame_id_;
-
-  // Scene change detection state
-  int frames_without_good_match_;      // Counter for frames without good matches
-  int last_detection_count_;           // Previous frame detection count
-
-  // Kalman filter
-  std::shared_ptr<KalmanFilterXYAH> kalman_filter_;
+  // Parameters
+  float track_high_thresh_;
+  float track_low_thresh_;
+  float new_track_thresh_;
+  int track_buffer_;
+  float match_thresh_;
+  bool fuse_score_;
+  int frame_rate_;
 };
 
 }  // namespace yolov8
@@ -153,3 +186,4 @@ private:
 }  // namespace nvidia
 
 #endif  // ISAAC_ROS_YOLOV8__BYTE_TRACKER_NODE_HPP_
+

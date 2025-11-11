@@ -10,14 +10,10 @@
 #ifndef ISAAC_ROS_YOLOV8__STRACK_HPP_
 #define ISAAC_ROS_YOLOV8__STRACK_HPP_
 
-#include <Eigen/Dense>
-#include <array>
-#include <memory>
-#include <string>
-#include <vector>
-
 #include "isaac_ros_yolov8/kalman_filter.hpp"
-#include "vision_msgs/msg/detection2_d.hpp"
+#include <Eigen/Dense>
+#include <memory>
+#include <vector>
 
 namespace nvidia
 {
@@ -26,6 +22,9 @@ namespace isaac_ros
 namespace yolov8
 {
 
+/**
+ * @brief Track state enumeration
+ */
 enum class TrackState
 {
   New = 0,
@@ -35,16 +34,64 @@ enum class TrackState
 };
 
 /**
- * @brief Single object tracking representation using Kalman filtering
+ * @brief Base class for object tracking
  */
-class STrack
+class BaseTrack
+{
+public:
+  BaseTrack();
+  virtual ~BaseTrack() = default;
+
+  /**
+   * @brief Get the next unique track ID
+   * @return int Next track ID
+   */
+  static int next_id();
+
+  /**
+   * @brief Reset the track ID counter
+   */
+  static void reset_id();
+
+  /**
+   * @brief Mark the track as lost
+   */
+  void mark_lost();
+
+  /**
+   * @brief Mark the track as removed
+   */
+  void mark_removed();
+
+  int track_id;         ///< Unique track identifier
+  bool is_activated;    ///< Whether the track has been activated
+  TrackState state;     ///< Current state of the track
+  int frame_id;         ///< Current frame ID
+  int start_frame;      ///< Frame where the track started
+  int end_frame;        ///< Frame where the track ended
+
+private:
+  static int _count;    ///< Global track counter
+};
+
+/**
+ * @brief Single object tracking representation using Kalman filtering
+ * 
+ * This class stores all information regarding individual tracklets and performs
+ * state updates and predictions based on Kalman filter.
+ */
+class STrack : public BaseTrack
 {
 public:
   /**
-   * @brief Construct a new STrack from a detection
-   * @param detection Detection2D message
+   * @brief Construct a new STrack object
+   * 
+   * @param xywh Bounding box in format [x, y, w, h] or [x, y, w, h, angle]
+   * @param score Confidence score
+   * @param cls Class label
+   * @param idx Detection index
    */
-  explicit STrack(const vision_msgs::msg::Detection2D & detection);
+  STrack(const std::vector<float> & xywh, float score, int cls, int idx);
 
   /**
    * @brief Predict the next state using Kalman filter
@@ -52,124 +99,103 @@ public:
   void predict();
 
   /**
-   * @brief Activate a new tracklet
-   * @param kalman_filter Shared Kalman filter
-   * @param frame_id Current frame ID
-   */
-  void activate(std::shared_ptr<KalmanFilterXYAH> kalman_filter, int frame_id);
-
-  /**
-   * @brief Re-activate a previously lost track
-   * @param new_track New detection to re-activate with
-   * @param frame_id Current frame ID
-   * @param new_id Whether to assign a new track ID
-   */
-  void re_activate(const STrack & new_track, int frame_id, bool new_id = false);
-
-  /**
-   * @brief Update the state with a new detection
-   * @param new_track New detection
-   * @param frame_id Current frame ID
-   */
-  void update(const STrack & new_track, int frame_id);
-
-  /**
-   * @brief Mark track as lost
-   */
-  void mark_lost();
-
-  /**
-   * @brief Mark track as removed
-   */
-  void mark_removed();
-
-  /**
-   * @brief Convert tlwh to xyah format for Kalman filter
-   * @param tlwh Bounding box in top-left-width-height format
-   * @return xyah format [center_x, center_y, aspect_ratio, height]
-   */
-  static Eigen::Vector4d tlwh_to_xyah(const std::array<double, 4> & tlwh);
-
-  /**
-   * @brief Convert xyah back to tlwh format
-   * @param xyah Bounding box in xyah format
-   * @return tlwh format [top, left, width, height]
-   */
-  static std::array<double, 4> xyah_to_tlwh(const Eigen::Vector4d & xyah);
-
-  /**
-   * @brief Static method to perform multi-track prediction
-   * @param stracks Vector of tracks to predict
-   * @param kalman_filter Shared Kalman filter
+   * @brief Perform multi-object predictive tracking using Kalman filter
+   * 
+   * @param stracks List of tracks to predict
+   * @param kalman_filter Shared Kalman filter instance
    */
   static void multi_predict(
     std::vector<STrack *> & stracks,
-    std::shared_ptr<KalmanFilterXYAH> kalman_filter);
+    KalmanFilterXYAH & kalman_filter);
 
   /**
-   * @brief Apply camera motion compensation using homography
-   * @param stracks Vector of tracks
+   * @brief Update track states using homography matrix (for camera motion compensation)
+   * 
+   * @param stracks List of tracks to update
    * @param H Homography matrix (2x3)
    */
-  static void multi_gmc(std::vector<STrack *> & stracks, const Eigen::Matrix<double, 2, 3> & H);
+  static void multi_gmc(std::vector<STrack *> & stracks, const Eigen::Matrix<float, 2, 3> & H);
 
   /**
-   * @brief Get the bounding box in tlwh format
-   * @return Bounding box [top, left, width, height]
+   * @brief Activate a new tracklet
+   * 
+   * @param kalman_filter Kalman filter instance
+   * @param frame_id Current frame ID
    */
-  std::array<double, 4> tlwh() const;
+  void activate(KalmanFilterXYAH & kalman_filter, int frame_id);
 
   /**
-   * @brief Get the bounding box in xyxy format
-   * @return Bounding box [x1, y1, x2, y2]
+   * @brief Reactivate a previously lost tracklet
+   * 
+   * @param new_track New track with updated information
+   * @param frame_id Current frame ID
+   * @param new_id Whether to assign a new track ID
    */
-  std::array<double, 4> xyxy() const;
+  void re_activate(STrack & new_track, int frame_id, bool new_id = false);
 
   /**
-   * @brief Convert current state to Detection2D message
-   * @return Detection2D message
+   * @brief Update the state of a matched track
+   * 
+   * @param new_track New track with updated information
+   * @param frame_id Current frame ID
    */
-  vision_msgs::msg::Detection2D to_detection() const;
+  void update(STrack & new_track, int frame_id);
 
-  // Getters
-  int track_id() const {return track_id_;}
-  int frame_id() const {return frame_id_;}
-  int start_frame() const {return start_frame_;}
-  int end_frame() const {return end_frame_;}
-  TrackState state() const {return state_;}
-  bool is_activated() const {return is_activated_;}
-  double score() const {return score_;}
-  std::string class_id() const {return class_id_;}
-  int tracklet_len() const {return tracklet_len_;}
-  int frames_without_update() const {return frames_without_update_;}
+  /**
+   * @brief Get bounding box in tlwh format (top-left-width-height)
+   * 
+   * @return Eigen::Vector4f Bounding box [x, y, w, h]
+   */
+  Eigen::Vector4f tlwh() const;
 
-  // Setters
-  void set_track_id(int id) {track_id_ = id;}
+  /**
+   * @brief Get bounding box in xyxy format (top-left-bottom-right)
+   * 
+   * @return Eigen::Vector4f Bounding box [x1, y1, x2, y2]
+   */
+  Eigen::Vector4f xyxy() const;
 
-  // Global track ID counter
-  static void reset_id();
-  static int next_id();
+  /**
+   * @brief Get bounding box in xywh format (center-width-height)
+   * 
+   * @return Eigen::Vector4f Bounding box [cx, cy, w, h]
+   */
+  Eigen::Vector4f xywh() const;
+
+  /**
+   * @brief Get the tracking result
+   * 
+   * @return std::vector<float> Result in format [x1, y1, x2, y2, track_id, score, cls, idx]
+   */
+  std::vector<float> result() const;
+
+  float score;              ///< Confidence score
+  int cls;                  ///< Class label
+  int idx;                  ///< Detection index
+  int tracklet_len;         ///< Length of the tracklet
+  std::unique_ptr<float> angle;  ///< Optional angle for oriented bounding boxes
 
 private:
-  std::array<double, 4> _tlwh;  // Private storage for tlwh
-  std::shared_ptr<KalmanFilterXYAH> kalman_filter_;
-  Eigen::VectorXd mean_;
-  Eigen::MatrixXd covariance_;
+  /**
+   * @brief Convert tlwh to xyah format for Kalman filter
+   * 
+   * @param tlwh Bounding box in tlwh format
+   * @return Eigen::Vector4f Bounding box in xyah format
+   */
+  static Eigen::Vector4f tlwh_to_xyah(const Eigen::Vector4f & tlwh);
 
-  int track_id_;
-  int frame_id_;
-  int start_frame_;
-  int end_frame_;
-  int tracklet_len_;
+  /**
+   * @brief Convert coordinates for Kalman filter
+   * 
+   * @param tlwh Bounding box in tlwh format
+   * @return Eigen::Vector4f Bounding box in xyah format
+   */
+  Eigen::Vector4f convert_coords(const Eigen::Vector4f & tlwh) const;
 
-  TrackState state_;
-  bool is_activated_;
-
-  double score_;
-  std::string class_id_;
-  int frames_without_update_;  // Counter for frames without measurement updates
-
-  static int _count;
+  Eigen::Vector4f _tlwh;                       ///< Internal tlwh representation
+  KalmanFilterXYAH * kalman_filter_;           ///< Pointer to Kalman filter
+  KalmanFilterXYAH::StateVector mean_;         ///< Mean state estimate
+  KalmanFilterXYAH::StateMatrix covariance_;   ///< Covariance matrix
 };
 
 }  // namespace yolov8
