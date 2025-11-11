@@ -54,6 +54,9 @@ namespace isaac_ros
 namespace yolov8
 {
 
+// Minimum image dimension required by Qwen2.5VL model
+constexpr int VLM_MIN_IMAGE_SIZE = 28;
+
 using ExactTimePolicy = message_filters::sync_policies::ExactTime<
   sensor_msgs::msg::Image,
   vision_msgs::msg::Detection2DArray>;
@@ -276,8 +279,14 @@ private:
         continue;
       }
 
+      // Ensure the cropped image meets minimum size requirements
+      cv::Mat resized_crop = ensureMinimumSize(cropped);
+      if (resized_crop.empty()) {
+        continue;
+      }
+
       std::vector<unsigned char> buffer;
-      if (!cv::imencode(".jpg", cropped, buffer)) {
+      if (!cv::imencode(".jpg", resized_crop, buffer)) {
         continue;
       }
 
@@ -489,8 +498,17 @@ private:
         continue;
       }
 
+      // Ensure the cropped image meets minimum size requirements
+      cv::Mat resized_crop = ensureMinimumSize(cropped);
+      if (resized_crop.empty()) {
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 2000,
+          "Skipping detection %zu because resized image is empty", idx);
+        continue;
+      }
+
       std::vector<unsigned char> buffer;
-      if (!cv::imencode(".jpg", cropped, buffer)) {
+      if (!cv::imencode(".jpg", resized_crop, buffer)) {
         RCLCPP_ERROR_THROTTLE(
           get_logger(), *get_clock(), 2000,
           "Failed to encode cropped image for detection %zu", idx);
@@ -730,6 +748,51 @@ private:
     // Return matching detections (empty if no matches found)
     // This prevents VLM processing when the desired class is not detected
     return matching_class_detections;
+  }
+
+  // Ensure image meets minimum size requirement for VLM processing
+  // Resizes with padding to preserve aspect ratio
+  static cv::Mat ensureMinimumSize(const cv::Mat & input)
+  {
+    if (input.empty()) {
+      return input;
+    }
+
+    // Check if resize is needed
+    if (input.cols >= VLM_MIN_IMAGE_SIZE && input.rows >= VLM_MIN_IMAGE_SIZE) {
+      return input;
+    }
+
+    // Calculate scale factor to make smallest dimension = VLM_MIN_IMAGE_SIZE
+    const double scale = static_cast<double>(VLM_MIN_IMAGE_SIZE) / 
+                         std::min(input.cols, input.rows);
+    
+    const int new_width = std::max(VLM_MIN_IMAGE_SIZE, 
+                                    static_cast<int>(std::round(input.cols * scale)));
+    const int new_height = std::max(VLM_MIN_IMAGE_SIZE, 
+                                     static_cast<int>(std::round(input.rows * scale)));
+
+    // Resize the image
+    cv::Mat resized;
+    cv::resize(input, resized, cv::Size(new_width, new_height), 0, 0, cv::INTER_LINEAR);
+
+    // If one dimension is still too small (due to extreme aspect ratio), add padding
+    const int final_width = std::max(new_width, VLM_MIN_IMAGE_SIZE);
+    const int final_height = std::max(new_height, VLM_MIN_IMAGE_SIZE);
+
+    if (final_width > new_width || final_height > new_height) {
+      // Create a canvas with padding (use gray color for padding)
+      cv::Mat padded = cv::Mat(final_height, final_width, input.type(), cv::Scalar(128, 128, 128));
+      
+      // Center the resized image
+      const int x_offset = (final_width - new_width) / 2;
+      const int y_offset = (final_height - new_height) / 2;
+      
+      resized.copyTo(padded(cv::Rect(x_offset, y_offset, new_width, new_height)));
+      return padded;
+    }
+
+    return resized;
   }
 
   // convert the detection to a region of interest
