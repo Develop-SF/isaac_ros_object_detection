@@ -236,6 +236,7 @@ private:
     vlm_queue_cv_.notify_one();
   }
 
+  // System 2: slow, careful thinking - VLM decision making
   // Process VLM task in worker thread
   void processVLMTask(const VLMTask & task)
   {
@@ -349,9 +350,10 @@ private:
           RCLCPP_INFO(get_logger(), "Found match! Track ID: %s is %s", 
                       selected_track_id.c_str(), parsed.object_name.c_str());
           
-          // Publish reason
+          // Publish reason with concise_reason if available
           std_msgs::msg::String reason_msg;
-          reason_msg.data = "Match found - Track ID " + parsed.id + ": " + parsed.object_name;
+          reason_msg.data = "Match found - Track ID " + parsed.id + ": " + parsed.object_name + 
+                          (parsed.concise_reason.empty() ? "" : " (" + parsed.concise_reason + ")");
           vlm_reason_pub_->publish(reason_msg);
         }
       }
@@ -447,211 +449,7 @@ private:
     return result;
   }
 
-	// System 2: careful thinking and make decision
-  void imageCallback(
-    const sensor_msgs::msg::Image::ConstSharedPtr & image_msg,
-    const vision_msgs::msg::Detection2DArray::ConstSharedPtr & detections_msg)
-  {
-    const auto candidate_detections = collectCandidateDetections(*detections_msg);
-    if (candidate_detections.empty()) {
-      return;
-    }
 
-    cv_bridge::CvImageConstPtr bridge;
-    try {
-      bridge = cv_bridge::toCvShare(image_msg, sensor_msgs::image_encodings::BGR8);
-    } catch (const cv_bridge::Exception & ex) {
-      RCLCPP_WARN(get_logger(), "Falling back to native image encoding: %s", ex.what());
-      try {
-        bridge = cv_bridge::toCvShare(image_msg, image_msg->encoding);
-      } catch (const cv_bridge::Exception & inner_ex) {
-        RCLCPP_ERROR(get_logger(), "Failed to convert image: %s", inner_ex.what());
-        return;
-      }
-    }
-
-    cv::Mat image = bridge->image;
-    if (image.empty()) {
-      RCLCPP_WARN(get_logger(), "Received empty image frame");
-      return;
-    }
-
-    std::vector<TrackImagePayload> track_image_payloads;  // track_id and cropped image
-    track_image_payloads.reserve(candidate_detections.size());
-
-    for (size_t idx = 0; idx < candidate_detections.size(); ++idx) {
-      const auto * detection_ptr = candidate_detections[idx];
-      auto roi_opt = detectionToRoi(*detection_ptr, image.cols, image.rows);
-      if (!roi_opt) {
-        RCLCPP_WARN_THROTTLE(
-          get_logger(), *get_clock(), 2000,
-          "Skipping detection %zu due to invalid ROI", idx);
-        continue;
-      }
-
-      const cv::Rect roi = *roi_opt;
-      cv::Mat cropped = image(roi).clone();
-      if (cropped.empty()) {
-        RCLCPP_WARN_THROTTLE(
-          get_logger(), *get_clock(), 2000,
-          "Skipping detection %zu because cropped image is empty", idx);
-        continue;
-      }
-
-      // Ensure the cropped image meets minimum size requirements
-      cv::Mat resized_crop = ensureMinimumSize(cropped);
-      if (resized_crop.empty()) {
-        RCLCPP_WARN_THROTTLE(
-          get_logger(), *get_clock(), 2000,
-          "Skipping detection %zu because resized image is empty", idx);
-        continue;
-      }
-
-      std::vector<unsigned char> buffer;
-      if (!cv::imencode(".jpg", resized_crop, buffer)) {
-        RCLCPP_ERROR_THROTTLE(
-          get_logger(), *get_clock(), 2000,
-          "Failed to encode cropped image for detection %zu", idx);
-        continue;
-      }
-
-      std::string track_id = detection_ptr->id;
-      if (track_id.empty()) {
-        track_id = "det_" + std::to_string(idx);
-      }
-
-      track_image_payloads.push_back(TrackImagePayload{track_id, base64_encode(buffer)});
-    }
-
-    if (track_image_payloads.empty()) {
-      RCLCPP_WARN(get_logger(), "Skipping VLM query because no detection crops were valid");
-      return;
-    }
-
-    std::string selected_track_id;
-    std::string combined_reason;
-    
-    if (desired_class_id_.empty()) {
-      // No class filter, use the first detection
-      selected_track_id = track_image_payloads.front().track_id;
-      std::lock_guard<std::mutex> lock(track_id_mutex_);
-      track_id_ = selected_track_id;
-    } else {
-      // Query VLM for each detection individually and collect all responses
-      std::vector<VLMJsonResponse> all_responses;
-      
-      auto total_start_time = std::chrono::steady_clock::now();
-      
-      for (const auto & payload : track_image_payloads) {
-        RCLCPP_INFO(get_logger(), "Querying VLM for Track ID: %s", payload.track_id.c_str());
-        
-        auto query_start_time = std::chrono::steady_clock::now();
-        auto vlm_response = queryVlmSingle(vlm_prompt_, payload.track_id, payload.image_base64);
-        auto query_end_time = std::chrono::steady_clock::now();
-        
-        auto query_duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-          query_end_time - query_start_time).count();
-        
-        if (!vlm_response) {
-          RCLCPP_WARN(get_logger(), "VLM response unavailable for Track ID: %s (query time: %ld ms)", 
-                      payload.track_id.c_str(), query_duration_ms);
-          continue;
-        }
-        
-        RCLCPP_INFO(get_logger(), "VLM raw response for Track ID %s (query time: %ld ms): '%s'", 
-                    payload.track_id.c_str(), query_duration_ms, vlm_response->c_str());
-        
-        // Parse JSON response
-        VLMJsonResponse parsed = parseVLMResponse(*vlm_response);
-        if (parsed.valid) {
-          RCLCPP_INFO(get_logger(), "VLM parsed - id: '%s', object: '%s', reason: '%s'", 
-                      parsed.id.c_str(), parsed.object_name.c_str(), parsed.concise_reason.c_str());
-          
-          all_responses.push_back(parsed);
-          
-          // Check if this detection matches the desired class name
-          if (selected_track_id.empty() && containsCaseInsensitive(parsed.object_name, desired_class_name_)) {
-            selected_track_id = parsed.id;
-            combined_reason = "Match found - Track ID " + parsed.id + ": " + parsed.object_name + 
-                            (parsed.concise_reason.empty() ? "" : " (" + parsed.concise_reason + ")");
-            
-            RCLCPP_INFO(get_logger(), "Found match! Track ID: %s is %s", 
-                        selected_track_id.c_str(), parsed.object_name.c_str());
-          }
-        } else {
-          RCLCPP_WARN(get_logger(), "Failed to parse JSON response for Track ID: %s", payload.track_id.c_str());
-        }
-      }
-      
-      auto total_end_time = std::chrono::steady_clock::now();
-      auto total_duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        total_end_time - total_start_time).count();
-      
-      RCLCPP_INFO(get_logger(), "VLM total processing time: %ld ms for %zu detections (avg: %.1f ms/detection)", 
-                  total_duration_ms, track_image_payloads.size(), 
-                  track_image_payloads.empty() ? 0.0 : static_cast<double>(total_duration_ms) / track_image_payloads.size());
-      
-      if (selected_track_id.empty()) {
-        // No match found, but publish what was detected
-        if (!all_responses.empty()) {
-          std::ostringstream no_match_reason;
-          no_match_reason << "No '" << desired_class_name_ << "' found. Detected: ";
-          for (size_t i = 0; i < all_responses.size(); ++i) {
-            if (i > 0) no_match_reason << ", ";
-            no_match_reason << "Track ID " << all_responses[i].id << ": " << all_responses[i].object_name;
-          }
-          combined_reason = no_match_reason.str();
-          
-          // Publish the reason explaining what was detected
-          std_msgs::msg::String reason_msg;
-          reason_msg.data = combined_reason;
-          vlm_reason_pub_->publish(reason_msg);
-          
-          RCLCPP_WARN(get_logger(), "%s", combined_reason.c_str());
-        }
-        
-        // Don't publish any detection bbox, but keep previous track_id for bboxesCallback
-        return;
-      }
-      
-      // Match found - publish the reason to a separate topic
-      std_msgs::msg::String reason_msg;
-      reason_msg.data = combined_reason;
-      vlm_reason_pub_->publish(reason_msg);
-      
-      // Update the stored track ID for bboxesCallback to use
-      {
-        std::lock_guard<std::mutex> lock(track_id_mutex_);
-        track_id_ = selected_track_id;
-      }
-      
-      RCLCPP_INFO(get_logger(), "Updated track_id to: %s", selected_track_id.c_str());
-    }
-
-    // Find and publish the detection with the selected track_id
-    const vision_msgs::msg::Detection2D * selected_detection = nullptr;
-    for (size_t idx = 0; idx < candidate_detections.size(); ++idx) {
-      if (candidate_detections[idx]->id == selected_track_id) {
-        selected_detection = candidate_detections[idx];
-        break;
-      }
-    }
-
-    if (selected_detection) {
-      vision_msgs::msg::Detection2D detection_to_publish = *selected_detection;
-      if (detection_to_publish.header.stamp.nanosec == 0 && detection_to_publish.header.stamp.sec == 0) {
-        detection_to_publish.header = detections_msg->header;
-      }
-      
-      // Publish the detection
-      filtered_detection2_d_pub_->publish(detection_to_publish);
-      RCLCPP_INFO(get_logger(), "Published detection from synchronized callback with track ID: %s", 
-                  detection_to_publish.id.c_str());
-    } else {
-      RCLCPP_WARN(get_logger(), "Selected track_id '%s' not found in current detections", 
-                  selected_track_id.c_str());
-    }
-  }
 
 	// System 1: fast republish
   void bboxesCallback(const vision_msgs::msg::Detection2DArray::ConstSharedPtr & detections_msg)
