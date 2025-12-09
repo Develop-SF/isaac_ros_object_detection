@@ -200,6 +200,13 @@ private:
     
     last_vlm_sample_time_ = now;
     
+    // Skip VLM processing if desired_class_name is empty (paused state)
+    if (desired_class_name_.empty()) {
+      RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 10000,
+        "VLM processing paused: desired_class_name is empty");
+      return;
+    }
+    
     // Skip if VLM is already processing
     if (vlm_processing_.load()) {
       RCLCPP_DEBUG(get_logger(), "VLM still processing, skipping frame");
@@ -240,6 +247,16 @@ private:
   // Process VLM task in worker thread
   void processVLMTask(const VLMTask & task)
   {
+    // Capture desired_class_name at the start to avoid race conditions
+    // (parameter might change during VLM processing)
+    std::string target_class_name = desired_class_name_;
+    
+    // Skip if desired_class_name is empty (paused state)
+    if (target_class_name.empty()) {
+      RCLCPP_DEBUG(get_logger(), "Skipping VLM task: desired_class_name is empty");
+      return;
+    }
+    
     const auto candidate_detections = collectCandidateDetections(*task.detections_msg);
     if (candidate_detections.empty()) {
       return;
@@ -345,7 +362,7 @@ private:
       for (const auto & parsed : all_responses) {
         if (!parsed.valid) continue;
         
-        if (selected_track_id.empty() && containsCaseInsensitive(parsed.object_name, desired_class_name_)) {
+        if (selected_track_id.empty() && containsCaseInsensitive(parsed.object_name, target_class_name)) {
           selected_track_id = parsed.id;
           RCLCPP_INFO(get_logger(), "Found match! Track ID: %s is %s", 
                       selected_track_id.c_str(), parsed.object_name.c_str());
@@ -374,7 +391,7 @@ private:
       if (selected_track_id.empty() && !valid_responses.empty()) {
         // No match - publish what was detected
         std::ostringstream no_match_reason;
-        no_match_reason << "No '" << desired_class_name_ << "' found. Detected: ";
+        no_match_reason << "No '" << target_class_name << "' found. Detected: ";
         for (size_t i = 0; i < valid_responses.size(); ++i) {
           if (i > 0) no_match_reason << ", ";
           no_match_reason << "Track ID " << valid_responses[i].id << ": " << valid_responses[i].object_name;
@@ -421,9 +438,20 @@ private:
           std::lock_guard<std::mutex> lock(track_id_mutex_);
           if (new_value != desired_class_name_) {
             track_id_.clear();
-            RCLCPP_INFO(get_logger(), 
-                        "Target class updated: '%s' -> '%s' (track_id cleared)",
-                        desired_class_name_.c_str(), new_value.c_str());
+            
+            if (new_value.empty()) {
+              RCLCPP_INFO(get_logger(), 
+                          "VLM processing paused: desired_class_name cleared (was: '%s')",
+                          desired_class_name_.c_str());
+            } else if (desired_class_name_.empty()) {
+              RCLCPP_INFO(get_logger(), 
+                          "VLM processing resumed: target class set to '%s'",
+                          new_value.c_str());
+            } else {
+              RCLCPP_INFO(get_logger(), 
+                          "Target class updated: '%s' -> '%s' (track_id cleared)",
+                          desired_class_name_.c_str(), new_value.c_str());
+            }
             
             // Clear pending VLM tasks
             {
