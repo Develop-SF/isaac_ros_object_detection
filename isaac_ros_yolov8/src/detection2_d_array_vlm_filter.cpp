@@ -69,7 +69,7 @@ public:
     input_qos_(::isaac_ros::common::AddQosParameter(*this, "DEFAULT", "input_qos")),
     output_qos_(::isaac_ros::common::AddQosParameter(*this, "DEFAULT", "output_qos")),
     desired_class_id_(declare_parameter<std::string>("desired_class_id", "")),
-    desired_class_name_(declare_parameter<std::string>("desired_class_name", "soy sauce")),
+    desired_class_name_(declare_parameter<std::string>("desired_class_name", "")),
     vlm_prompt_(declare_parameter<std::string>("vlm_prompt", "What is this? soy sauce or oil or seasoning")),
     vlm_model_(declare_parameter<std::string>("vlm_model", "qwen2.5vl:7b")),
     vlm_url_(declare_parameter<std::string>("vlm_url", "http://localhost:11434")),
@@ -119,8 +119,14 @@ public:
     param_callback_handle_ = add_on_set_parameters_callback(
       std::bind(&Detection2DArrayVLMFilter::parametersCallback, this, std::placeholders::_1));
     
-    RCLCPP_INFO(get_logger(), "Node initialized. Target class: '%s', VLM sampling rate: %.2f Hz", 
-                desired_class_name_.c_str(), vlm_sampling_rate_);
+    if (desired_class_name_.empty()) {
+      RCLCPP_WARN(get_logger(), "Node initialized with EMPTY desired_class_name. "
+                  "Pipeline will BLOCK until parameter is set. VLM sampling rate: %.2f Hz", 
+                  vlm_sampling_rate_);
+    } else {
+      RCLCPP_INFO(get_logger(), "Node initialized. Target class: '%s', VLM sampling rate: %.2f Hz", 
+                  desired_class_name_.c_str(), vlm_sampling_rate_);
+    }
   }
 
   ~Detection2DArrayVLMFilter()
@@ -251,12 +257,13 @@ private:
     // (parameter might change during VLM processing)
     std::string target_class_name = desired_class_name_;
     
-    // Skip if desired_class_name is empty (paused state)
+    // Block processing if desired_class_name is not set
     if (target_class_name.empty()) {
-      RCLCPP_DEBUG(get_logger(), "Skipping VLM task: desired_class_name is empty");
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+        "VLM processing blocked: desired_class_name is empty. "
+        "Set parameter to enable pipeline.");
       return;
     }
-    
     const auto candidate_detections = collectCandidateDetections(*task.detections_msg);
     if (candidate_detections.empty()) {
       return;
@@ -322,7 +329,10 @@ private:
 
     std::string selected_track_id;
     
-    if (desired_class_id_.empty()) {
+    // If desired_class_id is empty but desired_class_name is set,
+    // we still need to run VLM to identify the object
+    if (desired_class_id_.empty() && desired_class_name_.empty()) {
+      // Both empty - just use first detection
       selected_track_id = track_image_payloads.front().track_id;
       std::lock_guard<std::mutex> lock(track_id_mutex_);
       track_id_ = selected_track_id;
@@ -440,12 +450,12 @@ private:
             track_id_.clear();
             
             if (new_value.empty()) {
-              RCLCPP_INFO(get_logger(), 
-                          "VLM processing paused: desired_class_name cleared (was: '%s')",
+              RCLCPP_WARN(get_logger(), 
+                          "Target class cleared: '%s' -> EMPTY (pipeline will BLOCK)",
                           desired_class_name_.c_str());
             } else if (desired_class_name_.empty()) {
               RCLCPP_INFO(get_logger(), 
-                          "VLM processing resumed: target class set to '%s'",
+                          "Target class set: EMPTY -> '%s' (pipeline UNBLOCKED)",
                           new_value.c_str());
             } else {
               RCLCPP_INFO(get_logger(), 
@@ -497,6 +507,13 @@ private:
     {
       std::lock_guard<std::mutex> lock(track_id_mutex_);
       current_track_id = track_id_;
+    }
+
+    // If desired_class_name is empty, block the pipeline
+    if (desired_class_name_.empty()) {
+      RCLCPP_DEBUG_THROTTLE(get_logger(), *get_clock(), 5000,
+        "Pipeline blocked: desired_class_name is empty. Set parameter to enable.");
+      return;
     }
 
     // If track_id is empty, it means no target object was found by VLM
