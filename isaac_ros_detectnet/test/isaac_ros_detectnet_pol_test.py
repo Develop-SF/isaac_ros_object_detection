@@ -103,7 +103,7 @@ def generate_test_description():
     if os.environ.get('USE_BAZEL_RUNFILES_PATH', '0') == '1':
         trtexec_executable = r.Rlocation(
             '/'.join([
-                '_repo_rules2+tensorrt_x86_64_1030',
+                '_repo_rules2+tensorrt_x86_64_10130',
                 'usr',
                 'src',
                 'tensorrt',
@@ -212,12 +212,15 @@ class IsaacROSDetectNetPipelineTest(IsaacROSBaseTest):
     filepath = pathlib.Path(os.path.dirname(__file__))
     INIT_WAIT_SEC = 10
 
+    # Timeout for first successful inference (model loading + inference pipeline ready)
+    TIMEOUT_SEC = 300
+
     @IsaacROSBaseTest.for_each_test_case()
     def test_image_detection(self, test_folder):
 
         time.sleep(self.INIT_WAIT_SEC)
 
-        self.node._logger.info('Starting to test')
+        self.node._logger.info('Starting Isaac ROS DetectNet POL Test')
 
         """Expect the node to segment an image."""
         self.generate_namespace_lookup(
@@ -242,21 +245,24 @@ class IsaacROSDetectNetPipelineTest(IsaacROSBaseTest):
             camera_info.header = image.header
             camera_info.distortion_model = 'plumb_bob'
 
-            TIMEOUT = 60
-            end_time = time.time() + TIMEOUT
-            done = False
-            while time.time() < end_time:
+            # Publish images until we receive at least one detection response
+            self.node._logger.info(
+                'Publishing images until detection response received '
+                f'(timeout={self.TIMEOUT_SEC}s)')
+            start_time = time.time()
+            while 'detectnet/detections' not in received_messages:
+                if time.time() - start_time > self.TIMEOUT_SEC:
+                    self.fail('Timed out waiting for detection response')
                 image_pub.publish(image)
                 camera_info_pub.publish(camera_info)
                 rclpy.spin_once(self.node, timeout_sec=0.1)
+                time.sleep(1)
 
-                if 'detectnet/detections' in received_messages:
-                    done = True
-                    break
+            self.node._logger.info(
+                f'Received detection response after {time.time() - start_time:.1f}s')
 
-            self.assertTrue(
-                done, "Didn't receive output on detectnet/detections topic!")
-
+            self.node._logger.info('Finished Isaac ROS DetectNet POL Test')
         finally:
             self.node.destroy_subscription(detectnet_detections)
             self.node.destroy_publisher(image_pub)
+            self.node.destroy_publisher(camera_info_pub)
