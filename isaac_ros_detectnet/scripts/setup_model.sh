@@ -20,7 +20,21 @@
 # This script prepares the pretrained detectnet model for quick deployment with Triton
 # inside the Docker container
 
+if [ -n "$TENSORRT_COMMAND" ]; then
+  # If a custom tensorrt is used, ensure it's lib directory is added to the LD_LIBRARY_PATH
+  export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:$(readlink -f $(dirname ${TENSORRT_COMMAND})/../../../lib/$(uname -p)-linux-gnu/)"
+fi
+if [ -z "$ISAAC_ROS_WS" ] && [ -n "$ISAAC_ROS_ASSET_MODEL_PATH" ]; then
+  ISAAC_ROS_WS="$(readlink -f $(dirname ${ISAAC_ROS_ASSET_MODEL_PATH})/../../../..)"
+fi
+
 # default arguments
+ASSET_NAME="peoplenet"
+MODELS_DIR="${ISAAC_ROS_WS}/isaac_ros_assets/models/${ASSET_NAME}"
+EULA_URL="https://catalog.ngc.nvidia.com/orgs/nvidia/teams/tao/models/peoplenet?version=deployable_quantized_onnx_v2.6.3"
+ASSET_DIR="${MODELS_DIR}"
+ASSET_INSTALL_PATHS="${ASSET_DIR}/1/model.plan"
+
 MODEL_LINK="https://api.ngc.nvidia.com/v2/models/org/nvidia/team/tao/peoplenet/deployable_quantized_onnx_v2.6.3/files?redirect=true&path=resnet34_peoplenet.onnx"
 MODEL_FILE_NAME="resnet34_peoplenet.onnx"
 HEIGHT="544"
@@ -29,6 +43,8 @@ LABELS_LINK="https://api.ngc.nvidia.com/v2/models/org/nvidia/team/tao/peoplenet/
 CONFIG_FILE="peoplenet_config.pbtxt"
 PRECISION="int8"
 MAX_BATCH_SIZE="16"
+
+source "${ISAAC_ROS_ASSET_EULA_SH:-isaac_ros_asset_eula.sh}"
 
 function print_parameters() {
   echo
@@ -45,16 +61,16 @@ function print_parameters() {
 }
 
 function check_labels_files() {
-  if [[ ! -f "labels.txt" ]]
+  if [[ ! -f "${1:-.}/labels.txt" ]]
   then
     echo "Labels file does not exist with the model."
-    touch labels.txt
+    touch ${1:-.}/labels.txt
     echo "Please enter number of labels."
     read N_LABELS
     for (( i=0; i < $N_LABELS ; i=i+1 )); do
       echo "Please enter label string"
       read label
-      echo $label >> labels.txt
+      echo $label >> ${1:-.}/labels.txt
     done
   else
     echo "Labels file received with model."
@@ -80,19 +96,40 @@ function setup_model() {
   echo Creating Directory : "${OUTPUT_PATH}/1"
   rm -rf ${OUTPUT_PATH}
   mkdir -p ${OUTPUT_PATH}/1
-  cd ${OUTPUT_PATH}/1
   echo Downloading .onnx file from $MODEL_LINK
   echo From $MODEL_LINK
-  wget --content-disposition $MODEL_LINK -O resnet34_peoplenet.onnx
+  isaac_ros_common_download_asset --url "${MODEL_LINK}" --output-path "${OUTPUT_PATH}/1/${MODEL_FILE_NAME}" --cache-path "${ISAAC_ROS_DETECTNET_MODEL}"
+  MODEL_DOWNLOAD_RESULT=$?
   echo Checking if labels.txt exists
   echo From $LABELS_LINK
-  wget --content-disposition $LABELS_LINK -O labels.txt
-  check_labels_files
+  isaac_ros_common_download_asset --url "${LABELS_LINK}" --output-path "${OUTPUT_PATH}/1/labels.txt" --cache-path "${ISAAC_ROS_DETECTNET_LABELS}"
+  LABELS_DOWNLOAD_RESULT=$?
+
+  if [[ -n ${ISAAC_ROS_ASSETS_TEST} ]]; then
+    if [[ ${MODEL_DOWNLOAD_RESULT} -ne 0 ]]; then
+      echo "ERROR: Remote model does not match cached model."
+      exit 1
+    fi
+    if [[ ${LABELS_DOWNLOAD_RESULT} -ne 0 ]]; then
+      echo "ERROR: Remote labels do not match cached labels."
+      exit 1
+    fi
+    exit 0
+  elif [[ ${MODEL_DOWNLOAD_RESULT} -ne 0 ]]; then
+    echo "ERROR: Failed to download model."
+    exit 1
+  elif [[ ${LABELS_DOWNLOAD_RESULT} -ne 0 ]]; then
+    echo "ERROR: Failed to download labels."
+    exit 1
+  fi
+
+  check_labels_files "${OUTPUT_PATH}/1"
+
   echo Converting .onnx to a TensorRT Engine Plan
 
   # if model doesnt have labels.txt file, then create one manually
   # create custom model
-  /usr/src/tensorrt/bin/trtexec \
+  ${TENSORRT_COMMAND:-/usr/src/tensorrt/bin/trtexec} \
     --maxShapes="input_1:0":${MAX_BATCH_SIZE}x3x${HEIGHT}x${WIDTH} \
     --minShapes="input_1:0":1x3x${HEIGHT}x${WIDTH} \
     --optShapes="input_1:0":1x3x${HEIGHT}x${WIDTH} \
@@ -103,9 +140,13 @@ function setup_model() {
     --skipInference
 
   echo Copying .pbtxt config file to ${OUTPUT_PATH}
-  export ISAAC_ROS_DETECTNET_PATH=$(ros2 pkg prefix isaac_ros_detectnet --share)
-  cp $ISAAC_ROS_DETECTNET_PATH/config/$CONFIG_FILE \
-    ${OUTPUT_PATH}/config.pbtxt
+  if [ -n "$ISAAC_ROS_DETECTNET_CONFIG" ]; then
+    cp $ISAAC_ROS_DETECTNET_CONFIG ${OUTPUT_PATH}/config.pbtxt
+  else
+    export ISAAC_ROS_DETECTNET_PATH=$(ros2 pkg prefix isaac_ros_detectnet --share)
+    cp $ISAAC_ROS_DETECTNET_PATH/config/$CONFIG_FILE \
+      ${OUTPUT_PATH}/config.pbtxt
+  fi
   echo Completed quickstart setup
 }
 

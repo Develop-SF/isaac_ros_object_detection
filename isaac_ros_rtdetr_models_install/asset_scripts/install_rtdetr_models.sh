@@ -20,7 +20,7 @@
 set -e
 if [ -n "$TENSORRT_COMMAND" ]; then
   # If a custom tensorrt is used, ensure it's lib directory is added to the LD_LIBRARY_PATH
-  export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:$(readlink -f $(dirname ${TENSORRT_COMMAND})/../../../lib/x86_64-linux-gnu/)"
+  export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:$(readlink -f $(dirname ${TENSORRT_COMMAND})/../../../lib/$(uname -p)-linux-gnu/)"
 fi
 if [ -z "$ISAAC_ROS_WS" ] && [ -n "$ISAAC_ROS_ASSET_MODEL_PATH" ]; then
   ISAAC_ROS_WS="$(readlink -f $(dirname ${ISAAC_ROS_ASSET_MODEL_PATH})/../../..)"
@@ -37,12 +37,19 @@ source "${ISAAC_ROS_ASSET_EULA_SH:-isaac_ros_asset_eula.sh}"
 # Create directories if they don't exist
 mkdir -p ${MODELS_DIR}
 
-# Download SyntheticaDETR model
 SYNTHETICA_DETR_URL="https://api.ngc.nvidia.com/v2/models/nvidia/isaac/synthetica_detr/versions/1.0.0_onnx/files/sdetr_grasp.onnx"
 SYNTHETICA_DETR_ONNX="${MODELS_DIR}/sdetr_grasp.onnx"
 SYNTHETICA_DETR_ENGINE="${MODELS_DIR}/sdetr_grasp.plan"
 
-wget -nv -O "${SYNTHETICA_DETR_ONNX}" "${SYNTHETICA_DETR_URL}"
+# Download SyntheticaDETR model
+isaac_ros_common_download_asset --url "${SYNTHETICA_DETR_URL}" --output-path "${SYNTHETICA_DETR_ONNX}" --cache-path "${ISAAC_ROS_SYNTHETICA_DETR_MODEL}"
+SYNTHETICA_DETR_DOWNLOAD_RESULT=$?
+if [[ -n ${ISAAC_ROS_ASSETS_TEST} ]]; then
+  exit ${SYNTHETICA_DETR_DOWNLOAD_RESULT}
+elif [[ ${SYNTHETICA_DETR_DOWNLOAD_RESULT} -ne 0 ]]; then
+  echo "ERROR: Failed to download SyntheticaDETR model."
+  exit 1
+fi
 
 ${TENSORRT_COMMAND:-/usr/src/tensorrt/bin/trtexec} \
     --onnx=${SYNTHETICA_DETR_ONNX} \

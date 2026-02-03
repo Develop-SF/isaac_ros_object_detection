@@ -29,7 +29,15 @@ source "${ISAAC_ROS_ASSET_EULA_SH:-isaac_ros_asset_eula.sh}"
 
 mkdir -p $(dirname "$ASSET_INSTALL_PATHS")
 
-wget -nv -T 30 -t 1 "${MODEL_URL}" -O "${ASSET_DIR}/model.onnx"
+isaac_ros_common_download_asset --url "${MODEL_URL}" --output-path "${ASSET_DIR}/model.onnx" --cache-path "${ISAAC_ROS_PEOPLENET_AMR_MODEL}"
+ESS_MODEL_DOWNLOAD_RESULT=$?
+if [[ -n ${ISAAC_ROS_ASSETS_TEST} ]]; then
+  exit ${ESS_MODEL_DOWNLOAD_RESULT}
+elif [[ ${ESS_MODEL_DOWNLOAD_RESULT} -ne 0 ]]; then
+  echo "ERROR: Failed to download ESS model."
+  exit 1
+fi
+
 echo "Converting PeopleNet AMR onnx file to plan file."
 ${TENSORRT_COMMAND:-/usr/src/tensorrt/bin/trtexec} \
     --maxShapes="preprocess/input_1:0":1x480x640x3 \

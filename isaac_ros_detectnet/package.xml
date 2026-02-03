@@ -21,7 +21,7 @@ SPDX-License-Identifier: Apache-2.0
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>isaac_ros_detectnet</name>
-  <version>4.0.0</version>
+  <version>4.1.0</version>
   <description>DetectNet model processing</description>
 
   <maintainer email="isaac-ros-maintainers@nvidia.com">Isaac ROS Maintainers</maintainer>
@@ -49,6 +49,7 @@ SPDX-License-Identifier: Apache-2.0
   <test_depend>isaac_ros_test</test_depend>
   <test_depend>isaac_ros_dnn_image_encoder</test_depend>
   <test_depend>isaac_ros_triton</test_depend>
+  <test_depend>gxf_isaac_tensor_rt</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>
