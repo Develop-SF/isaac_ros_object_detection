@@ -20,7 +20,7 @@
 set -e
 if [ -n "$TENSORRT_COMMAND" ]; then
   # If a custom tensorrt is used, ensure it's lib directory is added to the LD_LIBRARY_PATH
-  export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:$(readlink -f $(dirname ${TENSORRT_COMMAND})/../../../lib/x86_64-linux-gnu/)"
+  export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:$(readlink -f $(dirname ${TENSORRT_COMMAND})/../../../lib/$(uname -p)-linux-gnu/)"
 fi
 if [ -z "$ISAAC_ROS_WS" ] && [ -n "$ISAAC_ROS_ASSET_MODEL_PATH" ]; then
   ISAAC_ROS_WS="$(readlink -f $(dirname ${ISAAC_ROS_ASSET_MODEL_PATH})/../../..)"
@@ -42,7 +42,18 @@ GROUNDING_DINO_URL="https://api.ngc.nvidia.com/v2/models/nvidia/tao/grounding_di
 GROUNDING_DINO_ONNX="${MODELS_DIR}/grounding_dino_model.onnx"
 GROUNDING_DINO_ENGINE="${MODELS_DIR}/grounding_dino_model.plan"
 
-wget -nv -O "${GROUNDING_DINO_ONNX}" "${GROUNDING_DINO_URL}"
+isaac_ros_common_download_asset --url "${GROUNDING_DINO_URL}" --output-path "${GROUNDING_DINO_ONNX}" --cache-path "${ISAAC_ROS_GROUNDING_DINO_MODEL}"
+MODEL_DOWNLOAD_RESULT=$?
+if [[ -n ${ISAAC_ROS_ASSETS_TEST} ]]; then
+  if [[ ${MODEL_DOWNLOAD_RESULT} -ne 0 ]]; then
+    echo "ERROR: Remote model does not match cached model."
+    exit 1
+  fi
+  exit 0
+elif [[ ${MODEL_DOWNLOAD_RESULT} -ne 0 ]]; then
+  echo "ERROR: Failed to download model."
+  exit 1
+fi
 
 ${TENSORRT_COMMAND:-/usr/src/tensorrt/bin/trtexec} \
     --onnx=${GROUNDING_DINO_ONNX} \

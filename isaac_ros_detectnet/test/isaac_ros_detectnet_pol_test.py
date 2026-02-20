@@ -103,7 +103,7 @@ def generate_test_description():
     if os.environ.get('USE_BAZEL_RUNFILES_PATH', '0') == '1':
         trtexec_executable = r.Rlocation(
             '/'.join([
-                '_repo_rules2+tensorrt_x86_64_10130',
+                '_repo_rules2+tensor_rt_public_x86_64',
                 'usr',
                 'src',
                 'tensorrt',
