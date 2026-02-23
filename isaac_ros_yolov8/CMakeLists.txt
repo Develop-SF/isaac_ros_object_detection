@@ -52,16 +52,16 @@ endif()
 ament_auto_find_build_dependencies()
 find_package(ament_cmake_python REQUIRED)
 
+# Ensure CUDA imported targets (e.g., CUDA::nvtx3) are available
+find_package(CUDAToolkit REQUIRED)
+
 # NVTX
 option(USE_NVTX "Enable NVTX markers for improved profiling (if available)" ON)
 if(USE_NVTX)
     add_definitions(-DUSE_NVTX)
     link_directories("${CUDA_TOOLKIT_ROOT_DIR}/lib64")
-    link_libraries("CUDA::nvtx3")
+    link_libraries("CUDA::nvToolsExt")
 endif()
-
-# Ensure CUDA imported targets (e.g., CUDA::nvtx3) are available
-find_package(CUDAToolkit REQUIRED)
 
 # yolov8 Detection2DArray VLM Filter node
 ament_auto_add_library(detection2_d_array_vlm_filter_node SHARED src/detection2_d_array_vlm_filter.cpp)
