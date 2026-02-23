@@ -39,6 +39,14 @@ def generate_launch_description():
             default_value='',
             description='The absolute file path to the TensorRT engine file'),
         DeclareLaunchArgument(
+            'image_input_topic',
+            default_value='/image',
+            description='The topic to subscribe to for input images'),
+        DeclareLaunchArgument(
+            'camera_info_input_topic',
+            default_value='/camera_info',
+            description='The topic to subscribe to for camera info'),
+        DeclareLaunchArgument(
             'input_tensor_names',
             default_value='["input_tensor"]',
             description='A list of tensor names to bound to the specified input binding names'),
@@ -62,6 +70,10 @@ def generate_launch_description():
             'force_engine_update',
             default_value='False',
             description='Whether TensorRT should update the TensorRT engine file or not'),
+            DeclareLaunchArgument(
+                'num_classes',
+                default_value='80',
+                description='Number of classes in the YOLOv8 model'),
     ]
 
     # DNN Image Encoder parameters
@@ -85,6 +97,10 @@ def generate_launch_description():
     # YOLOv8 Decoder parameters
     confidence_threshold = LaunchConfiguration('confidence_threshold')
     nms_threshold = LaunchConfiguration('nms_threshold')
+    num_classes = LaunchConfiguration('num_classes')
+
+    image_input_topic = LaunchConfiguration('image_input_topic')
+    camera_info_input_topic = LaunchConfiguration('camera_info_input_topic')
 
     encoder_dir = get_package_share_directory('isaac_ros_dnn_image_encoder')
     yolov8_encoder_launch = IncludeLaunchDescription(
@@ -101,8 +117,8 @@ def generate_launch_description():
             'attach_to_shared_component_container': 'True',
             'component_container_name': 'tensor_rt_container',
             'dnn_image_encoder_namespace': 'yolov8_encoder',
-            'image_input_topic': '/image',
-            'camera_info_input_topic': '/camera_info',
+            'image_input_topic': image_input_topic,
+            'camera_info_input_topic': camera_info_input_topic,
             'tensor_output_topic': '/tensor_pub',
         }.items(),
     )
@@ -130,14 +146,25 @@ def generate_launch_description():
         parameters=[{
             'confidence_threshold': confidence_threshold,
             'nms_threshold': nms_threshold,
-        }]
+            'num_classes': num_classes,
+            'camera_info_topic': camera_info_input_topic,
+            'network_width': network_image_width,
+            'network_height': network_image_height,
+        }],
+        remappings=[
+            ('detections_output', 'detections_output')
+        ]
     )
 
     tensor_rt_container = ComposableNodeContainer(
         name='tensor_rt_container',
         package='rclcpp_components',
         executable='component_container_mt',
-        composable_node_descriptions=[tensor_rt_node, yolov8_decoder_node],
+        # composable_node_descriptions=[tensor_rt_node, yolov8_decoder_node],
+        composable_node_descriptions=[
+            tensor_rt_node,
+            yolov8_decoder_node
+        ],
         output='screen',
         arguments=['--ros-args', '--log-level', 'INFO'],
         namespace=''

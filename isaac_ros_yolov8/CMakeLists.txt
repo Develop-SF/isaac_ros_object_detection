@@ -29,7 +29,25 @@ find_package(vision_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(OpenCV REQUIRED)
+find_package(message_filters REQUIRED)
+find_package(Eigen3 REQUIRED)
 include_directories(${OpenCV_INCLUDE_DIRS})
+include_directories(${EIGEN3_INCLUDE_DIRS})
+
+find_path(CPP_HTTPLIB_INCLUDE_DIR httplib.h)
+
+if(NOT CPP_HTTPLIB_INCLUDE_DIR)
+  include(FetchContent)
+  set(FETCHCONTENT_UPDATES_DISCONNECTED ON)
+  FetchContent_Declare(
+    cpp_httplib
+    GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
+    GIT_TAG v0.27.0
+  )
+  FetchContent_Populate(cpp_httplib)
+  set(CPP_HTTPLIB_INCLUDE_DIR ${cpp_httplib_SOURCE_DIR})
+  install(FILES ${cpp_httplib_SOURCE_DIR}/httplib.h DESTINATION include)
+endif()
 
 ament_auto_find_build_dependencies()
 find_package(ament_cmake_python REQUIRED)
@@ -45,6 +63,23 @@ endif()
 # Ensure CUDA imported targets (e.g., CUDA::nvtx3) are available
 find_package(CUDAToolkit REQUIRED)
 
+# yolov8 Detection2DArray VLM Filter node
+ament_auto_add_library(detection2_d_array_vlm_filter_node SHARED src/detection2_d_array_vlm_filter.cpp)
+rclcpp_components_register_nodes(detection2_d_array_vlm_filter_node "nvidia::isaac_ros::yolov8::Detection2DArrayVLMFilter")
+set(node_plugins "${node_plugins}nvidia::isaac_ros::yolov8::Detection2DArrayVLMFilter;$<TARGET_FILE:detection2_d_array_vlm_filter_node>\n")
+ament_target_dependencies(detection2_d_array_vlm_filter_node
+  message_filters
+  vision_msgs
+  sensor_msgs
+  cv_bridge
+  rclcpp)
+target_link_libraries(detection2_d_array_vlm_filter_node ${OpenCV_LIBRARIES})
+
+if(CPP_HTTPLIB_INCLUDE_DIR)
+  target_include_directories(
+    detection2_d_array_vlm_filter_node PRIVATE ${CPP_HTTPLIB_INCLUDE_DIR})
+endif()
+
 # yolov8 Decoder node
 ament_auto_add_library(yolov8_decoder_node SHARED src/yolov8_decoder_node.cpp)
 rclcpp_components_register_nodes(yolov8_decoder_node "nvidia::isaac_ros::yolov8::YoloV8DecoderNode")
@@ -53,8 +88,27 @@ set_target_properties(yolov8_decoder_node PROPERTIES
   BUILD_WITH_INSTALL_RPATH TRUE
   BUILD_RPATH_USE_ORIGIN TRUE
   INSTALL_RPATH_USE_LINK_PATH TRUE)
+ament_target_dependencies(yolov8_decoder_node
+  rclcpp
+  isaac_ros_managed_nitros)
 
 target_link_libraries(yolov8_decoder_node ${OpenCV_LIBRARIES})
+
+# ByteTracker node - compile all sources together
+ament_auto_add_library(byte_tracker_node SHARED 
+  src/kalman_filter.cpp
+  src/matching.cpp
+  src/strack.cpp
+  src/byte_tracker_node.cpp
+)
+rclcpp_components_register_nodes(byte_tracker_node "nvidia::isaac_ros::yolov8::ByteTrackerNode")
+set(node_plugins "${node_plugins}nvidia::isaac_ros::yolov8::ByteTrackerNode;$<TARGET_FILE:byte_tracker_node>\n")
+target_link_libraries(byte_tracker_node Eigen3::Eigen)
+ament_target_dependencies(byte_tracker_node
+  rclcpp
+  rclcpp_components
+  vision_msgs
+  sensor_msgs)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
@@ -75,6 +129,7 @@ ament_python_install_package(${PROJECT_NAME})
 
 install(PROGRAMS
   scripts/isaac_ros_yolov8_visualizer.py
+  scripts/mask_visualizer.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -84,4 +139,4 @@ ament_index_get_resource(ISAAC_ROS_COMMON_CMAKE_PATH isaac_ros_common_cmake_path
 include("${ISAAC_ROS_COMMON_CMAKE_PATH}/isaac_ros_common-version-info.cmake")
 generate_version_info(${PROJECT_NAME})
 
-ament_auto_package(INSTALL_TO_SHARE launch)
+ament_auto_package(INSTALL_TO_SHARE launch config)
