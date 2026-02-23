@@ -21,6 +21,7 @@
 # then renders the output boxes on top of the image and publishes
 # the result as an image message
 
+import os
 import cv2
 import cv_bridge
 import message_filters
@@ -28,8 +29,11 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from vision_msgs.msg import Detection2DArray
+import yaml
+from ament_index_python.packages import get_package_share_directory
 
-names = {
+# Default COCO-80 names (fallback)
+DEFAULT_NAMES = {
         0: 'person',
         1: 'bicycle',
         2: 'car',
@@ -120,6 +124,24 @@ class Yolov8Visualizer(Node):
 
     def __init__(self):
         super().__init__('yolov8_visualizer')
+        
+        # Load class names from config
+        config_path = self.declare_parameter('class_config', '')
+        if config_path.value:
+            pkg_share = get_package_share_directory('isaac_ros_yolov8')
+            full_config_path = os.path.join(pkg_share, 'config', config_path.value)
+            if os.path.exists(full_config_path):
+                with open(full_config_path, 'r') as f:
+                    config = yaml.safe_load(f)
+                    self.names = config.get('names', DEFAULT_NAMES)
+                self.get_logger().info(f'Loaded class names from {full_config_path}')
+            else:
+                self.get_logger().warn(f'Config file {full_config_path} not found, using default COCO-80')
+                self.names = DEFAULT_NAMES
+        else:
+            self.get_logger().info('No class config specified, using default COCO-80')
+            self.names = DEFAULT_NAMES
+        
         self._bridge = cv_bridge.CvBridge()
         self._processed_image_pub = self.create_publisher(
             Image, 'yolov8_processed_image',  self.QUEUE_SIZE)
@@ -148,9 +170,18 @@ class Yolov8Visualizer(Node):
             width = detection.bbox.size_x
             height = detection.bbox.size_y
 
-            label = names[int(detection.results[0].hypothesis.class_id)]
+            class_id = int(detection.results[0].hypothesis.class_id)
+            if class_id in self.names:
+                obj_name = self.names[class_id]
+            else:
+                obj_name = f'class_{class_id}'  # Fallback for unknown classes
             conf_score = detection.results[0].hypothesis.score
-            label = f'{label} {conf_score:.2f}'
+            
+            # Extract track ID from detection.id
+            track_id = detection.id if detection.id else 'N/A'
+            
+            # Format: obj_name(id): conf
+            label = f'{obj_name}({track_id}): {conf_score:.2f}'
 
             min_pt = (round(center_x - (width / 2.0)),
                       round(center_y - (height / 2.0)))

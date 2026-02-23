@@ -1,0 +1,6 @@
+'#': Class configuration for best_kitchen_utilities model
+names:
+  0: ladle
+  1: sauce
+  2: seasoning
+  3: wok

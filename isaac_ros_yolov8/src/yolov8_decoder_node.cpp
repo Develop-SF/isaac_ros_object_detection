@@ -33,6 +33,8 @@
 
 #include "vision_msgs/msg/detection2_d_array.hpp"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
+#include "sensor_msgs/msg/camera_info.hpp"
+#include "isaac_ros_common/qos.hpp"
 
 
 namespace nvidia
@@ -43,27 +45,45 @@ namespace yolov8
 {
 YoloV8DecoderNode::YoloV8DecoderNode(const rclcpp::NodeOptions options)
 : rclcpp::Node("yolov8_decoder_node", options),
+  input_qos_(::isaac_ros::common::AddQosParameter(*this, "DEFAULT", "input_qos")),
+  output_qos_(::isaac_ros::common::AddQosParameter(*this, "DEFAULT", "output_qos")),
   nitros_sub_{std::make_shared<nvidia::isaac_ros::nitros::ManagedNitrosSubscriber<
         nvidia::isaac_ros::nitros::NitrosTensorListView>>(
       this,
       "tensor_sub",
       nvidia::isaac_ros::nitros::nitros_tensor_list_nchw_rgb_f32_t::supported_type_name,
       std::bind(&YoloV8DecoderNode::InputCallback, this,
-      std::placeholders::_1))},
+      std::placeholders::_1),
+      nvidia::isaac_ros::nitros::NitrosDiagnosticsConfig(),
+      input_qos_)},
   pub_{create_publisher<vision_msgs::msg::Detection2DArray>(
-      "detections_output", 50)},
+      "detections_output", output_qos_)},
   tensor_name_{declare_parameter<std::string>("tensor_name", "output_tensor")},
   confidence_threshold_{declare_parameter<double>("confidence_threshold", 0.25)},
   nms_threshold_{declare_parameter<double>("nms_threshold", 0.45)},
-  num_classes_{declare_parameter<int64_t>("num_classes", 80)}
+  num_classes_{declare_parameter<int64_t>("num_classes", 80)},
+  network_width_{declare_parameter<int64_t>("network_width", 640)},
+  network_height_{declare_parameter<int64_t>("network_height", 640)}
 {
   CHECK_CUDA_ERROR(
     ::nvidia::isaac_ros::common::initNamedCudaStream(
       cuda_stream_, "isaac_ros_yolov8_decoder_node"),
     "Error initializing CUDA stream");
+
+  // Camera info topic parameter and subscription
+  camera_info_topic_ = declare_parameter<std::string>("camera_info_topic", camera_info_topic_);
+  camera_info_sub_ = create_subscription<sensor_msgs::msg::CameraInfo>(
+    camera_info_topic_, 10, std::bind(&YoloV8DecoderNode::CameraInfoCallback, this, std::placeholders::_1));
 }
 
 YoloV8DecoderNode::~YoloV8DecoderNode() = default;
+
+void YoloV8DecoderNode::CameraInfoCallback(const sensor_msgs::msg::CameraInfo::SharedPtr msg)
+{
+  // Store original image dimensions for mapping detections
+  original_width_ = static_cast<int>(msg->width);
+  original_height_ = static_cast<int>(msg->height);
+}
 
 void YoloV8DecoderNode::InputCallback(const nvidia::isaac_ros::nitros::NitrosTensorListView & msg)
 {
@@ -71,6 +91,12 @@ void YoloV8DecoderNode::InputCallback(const nvidia::isaac_ros::nitros::NitrosTen
   size_t buffer_size{tensor.GetTensorSize()};
   std::vector<float> results_vector{};
   results_vector.resize(buffer_size);
+  // Safety check: Verify tensor data is valid
+  if (buffer_size == 0 || results_vector.empty()) {
+    RCLCPP_ERROR(this->get_logger(), "Invalid tensor: empty or zero-sized buffer");
+    return;
+  }
+
   auto cuda_result = cudaMemcpyAsync(
     results_vector.data(), tensor.GetBuffer(), buffer_size,
     cudaMemcpyDefault, cuda_stream_);
@@ -87,8 +113,38 @@ void YoloV8DecoderNode::InputCallback(const nvidia::isaac_ros::nitros::NitrosTen
   std::vector<int> classes;
 
   //  Output dimensions = [1, 84, 8400]
-  int out_dim = 8400;
+  int out_dim = 8400;  // Default anchor count for YOLOv8 models
+  
+  // Estimate tensor dimensions from buffer size
+  // Buffer size = sizeof(float) * num_predictions * (4 + num_classes)
+  const size_t float_count = buffer_size / sizeof(float);
+  const int estimated_features = static_cast<int>(float_count / out_dim);
+  const int estimated_classes = estimated_features - 4;  // 4 values are for bbox coordinates
+  
+  // Use the smaller of the configured classes or estimated classes to avoid out-of-bounds
+  int classes_to_use = estimated_classes > 0 ? 
+      std::min(static_cast<int>(num_classes_), estimated_classes) : 
+      static_cast<int>(num_classes_);
+      
+  RCLCPP_DEBUG(this->get_logger(), "Tensor buffer size: %zu bytes, estimated features: %d, using %d classes", 
+              buffer_size, estimated_features, classes_to_use);
+  
   float * results_data = reinterpret_cast<float *>(results_vector.data());
+
+  // Model input (resized) dimensions from parameters
+  const int64_t resized_width = network_width_;
+  const int64_t resized_height = network_height_;
+
+  // Compute scale and padding to map model-space boxes to original image if camera info is available
+  float scale = 1.0f;
+  float padding_x = 0.0f;
+  float padding_y = 0.0f;
+  if (original_width_ > 0 && original_height_ > 0) {
+    scale = std::min(static_cast<float>(resized_width) / static_cast<float>(original_width_),
+                     static_cast<float>(resized_height) / static_cast<float>(original_height_));
+    padding_x = (static_cast<float>(resized_width) - (original_width_ * scale)) / 2.0f;
+    padding_y = (static_cast<float>(resized_height) - (original_height_ * scale)) / 2.0f;
+  }
 
   for (int i = 0; i < out_dim; i++) {
     float x = *(results_data + i);
@@ -102,8 +158,16 @@ void YoloV8DecoderNode::InputCallback(const nvidia::isaac_ros::nitros::NitrosTen
     float height = h;
 
     std::vector<float> conf;
-    for (int j = 0; j < num_classes_; j++) {
-      conf.push_back(*(results_data + (out_dim * (4 + j)) + i));
+    // Limit class access to the valid range
+    for (int j = 0; j < classes_to_use; j++) {
+      // Safely access confidence values: offset = base + (out_dim * (4 + class_index)) + anchor_index
+      const size_t offset = out_dim * (4 + j) + i;
+      if (offset < float_count) {
+        conf.push_back(*(results_data + offset));
+      } else {
+        // If we're out of bounds, add a zero confidence
+        conf.push_back(0.0f);
+      }
     }
 
     std::vector<float>::iterator ind_max_conf;
@@ -111,7 +175,18 @@ void YoloV8DecoderNode::InputCallback(const nvidia::isaac_ros::nitros::NitrosTen
     int max_index = distance(std::begin(conf), ind_max_conf);
     float val_max_conf = *max_element(std::begin(conf), std::end(conf));
 
-    bboxes.push_back(cv::Rect(x1, y1, width, height));
+    // Map to original image coordinates if camera info provided; otherwise keep model-space coords
+    float x1_scaled = x1;
+    float y1_scaled = y1;
+    float width_scaled = width;
+    float height_scaled = height;
+    if (original_width_ > 0 && original_height_ > 0 && scale > 0.0f) {
+      x1_scaled = (x1 - padding_x) / scale;
+      y1_scaled = (y1 - padding_y) / scale;
+      width_scaled = width / scale;
+      height_scaled = height / scale;
+    }
+    bboxes.push_back(cv::Rect(x1_scaled, y1_scaled, width_scaled, height_scaled));
     indices.push_back(i);
     scores.push_back(val_max_conf);
     classes.push_back(max_index);
