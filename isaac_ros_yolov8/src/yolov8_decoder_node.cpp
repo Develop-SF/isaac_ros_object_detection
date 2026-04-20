@@ -72,8 +72,12 @@ YoloV8DecoderNode::YoloV8DecoderNode(const rclcpp::NodeOptions options)
   mask_threshold_{declare_parameter<double>("mask_threshold", 0.5)}
 {
   if (seg_enabled_) {
+    // Publishes a per-pixel label map (CV_8UC1): 0 = background, k in
+    // 1..N = the k-th detection in the companion Detection2DArray. A
+    // downstream node is expected to look up the VLM-selected detection's
+    // label and extract a single-target binary mask.
     mask_pub_ = create_publisher<sensor_msgs::msg::Image>(
-      "yolo_segmentation", output_qos_);
+      "yolo_segmentation_map", output_qos_);
   }
   CHECK_CUDA_ERROR(
     ::nvidia::isaac_ros::common::initNamedCudaStream(
@@ -277,9 +281,10 @@ void YoloV8DecoderNode::InputCallback(const nvidia::isaac_ros::nitros::NitrosTen
   // ---- Seg mask assembly ----
   // For every NMS-surviving detection, reconstruct its pixel mask by linearly
   // combining the 32 mask prototypes using the anchor's mask coefficients,
-  // then OR-merging each instance mask into a single binary image. The output
-  // is cropped to the valid (non-padded) region so downstream resize nodes
-  // receive a mask at the original-image aspect ratio.
+  // then paint that instance's bbox region in a shared label map with its
+  // 1-based detection index (matching its position in final_detections_arr).
+  // A downstream node uses this label map plus the VLM-selected Detection2D
+  // to extract a single-target mask.
   const size_t proto_plane = static_cast<size_t>(proto_h_) * proto_w_;
   const size_t expected_proto = static_cast<size_t>(num_mask_coef_) * proto_plane;
   if (proto_float_count < expected_proto) {
@@ -295,8 +300,17 @@ void YoloV8DecoderNode::InputCallback(const nvidia::isaac_ros::nitros::NitrosTen
                     static_cast<int>(proto_plane), CV_32F,
                     proto_vector.data());
 
+  // uint8 label map caps at 255 distinct instances per frame, which we never
+  // approach in practice (NMS typically leaves < 20 survivors).
+  if (indices.size() > 255) {
+    RCLCPP_WARN(this->get_logger(),
+      "seg label map overflow: %zu detections > 255; truncating",
+      indices.size());
+  }
+  const size_t n_labels = std::min<size_t>(indices.size(), 255);
+
   std::vector<float> coef(static_cast<size_t>(num_mask_coef_));
-  for (size_t k = 0; k < indices.size(); k++) {
+  for (size_t k = 0; k < n_labels; k++) {
     const int anchor = indices[k];
     for (int m = 0; m < num_mask_coef_; m++) {
       const size_t offset =
@@ -323,8 +337,10 @@ void YoloV8DecoderNode::InputCallback(const nvidia::isaac_ros::nitros::NitrosTen
     if (crop.area() == 0) {
       continue;
     }
-    cv::Mat dst = combined(crop);
-    cv::max(dst, mask_net(crop), dst);
+    // Paint this detection's bbox region of the label map with its 1-based
+    // index. Later detections overwrite earlier ones on overlap, mirroring
+    // the post-NMS order.
+    combined(crop).setTo(static_cast<uint8_t>(k + 1), mask_net(crop));
   }
 
   // Extract the valid (non-padded) region so the published mask matches the
