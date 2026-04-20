@@ -1,0 +1,15 @@
+'#': Class configuration for the sns_perception fine-tuned YOLO11n-seg model (best.pt)
+names:
+  0: spatula
+  1: oil_bottle
+  2: soy_sauce_bottle
+  3: others
+  4: piper
+  5: person
+  6: square_container
+  7: rectangle_container
+  8: circle_container
+  9: green_sponge
+  10: ceramic_bowl
+  11: steel_bowl
+  12: wooden_table
