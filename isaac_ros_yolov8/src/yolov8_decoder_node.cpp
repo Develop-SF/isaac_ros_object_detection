@@ -63,8 +63,18 @@ YoloV8DecoderNode::YoloV8DecoderNode(const rclcpp::NodeOptions options)
   nms_threshold_{declare_parameter<double>("nms_threshold", 0.45)},
   num_classes_{declare_parameter<int64_t>("num_classes", 80)},
   network_width_{declare_parameter<int64_t>("network_width", 640)},
-  network_height_{declare_parameter<int64_t>("network_height", 640)}
+  network_height_{declare_parameter<int64_t>("network_height", 640)},
+  seg_enabled_{declare_parameter<bool>("seg_enabled", false)},
+  proto_tensor_name_{declare_parameter<std::string>("proto_tensor_name", "proto_tensor")},
+  num_mask_coef_{declare_parameter<int64_t>("num_mask_coef", 32)},
+  proto_h_{declare_parameter<int64_t>("proto_h", 160)},
+  proto_w_{declare_parameter<int64_t>("proto_w", 160)},
+  mask_threshold_{declare_parameter<double>("mask_threshold", 0.5)}
 {
+  if (seg_enabled_) {
+    mask_pub_ = create_publisher<sensor_msgs::msg::Image>(
+      "yolo_segmentation", output_qos_);
+  }
   CHECK_CUDA_ERROR(
     ::nvidia::isaac_ros::common::initNamedCudaStream(
       cuda_stream_, "isaac_ros_yolov8_decoder_node"),

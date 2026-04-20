@@ -29,6 +29,7 @@
 #include "vision_msgs/msg/detection2_d_array.hpp"
 #include "isaac_ros_nitros_tensor_list_type/nitros_tensor_list_view.hpp"
 #include "sensor_msgs/msg/camera_info.hpp"
+#include "sensor_msgs/msg/image.hpp"
 
 
 #include "cuda_runtime.h"  // NOLINT
@@ -62,6 +63,9 @@ private:
   // Publisher for output Detection2DArray messages
   rclcpp::Publisher<vision_msgs::msg::Detection2DArray>::SharedPtr pub_;
 
+  // Publisher for combined binary segmentation mask (seg_enabled_ only)
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr mask_pub_;
+
   // Name of tensor in NitrosTensorList
   std::string tensor_name_{};
 
@@ -71,6 +75,14 @@ private:
   int64_t num_classes_{};
   int64_t network_width_{};
   int64_t network_height_{};
+
+  // YOLOv8-seg parameters (ignored when seg_enabled_ is false)
+  bool seg_enabled_{};
+  std::string proto_tensor_name_{};
+  int64_t num_mask_coef_{};
+  int64_t proto_h_{};
+  int64_t proto_w_{};
+  double mask_threshold_{};
 
   // Original image size obtained from camera info (used to map detections)
   int original_width_ = 0;
