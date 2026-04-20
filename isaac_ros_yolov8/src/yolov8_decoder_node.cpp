@@ -113,11 +113,34 @@ void YoloV8DecoderNode::InputCallback(const nvidia::isaac_ros::nitros::NitrosTen
   if (cuda_result != cudaSuccess) {
     throw std::runtime_error("Failed to copy results from CUDA buffer");
   }
+
+  // When seg is enabled, also fetch the mask prototype tensor. The single
+  // stream synchronize below covers both copies.
+  std::vector<float> proto_vector;
+  size_t proto_float_count = 0;
+  if (seg_enabled_) {
+    auto proto_tensor = msg.GetNamedTensor(proto_tensor_name_);
+    size_t proto_bytes = proto_tensor.GetTensorSize();
+    proto_float_count = proto_bytes / sizeof(float);
+    proto_vector.resize(proto_float_count);
+    cuda_result = cudaMemcpyAsync(
+      proto_vector.data(), proto_tensor.GetBuffer(), proto_bytes,
+      cudaMemcpyDefault, cuda_stream_);
+    if (cuda_result != cudaSuccess) {
+      throw std::runtime_error("Failed to copy proto tensor from CUDA buffer");
+    }
+  }
+
   cuda_result = cudaStreamSynchronize(cuda_stream_);
   if (cuda_result != cudaSuccess) {
     throw std::runtime_error("Failed to synchronize CUDA stream");
   }
   std::vector<cv::Rect> bboxes;
+  // Parallel vector of model-space bboxes (pre-scale). Used only by the seg
+  // branch to crop per-instance masks; for seg_enabled_=false this stays
+  // unused. Kept separate from `bboxes` because that one may be converted to
+  // original-image coordinates when camera_info is available.
+  std::vector<cv::Rect> model_bboxes;
   std::vector<float> scores;
   std::vector<int> indices;
   std::vector<int> classes;
@@ -197,6 +220,9 @@ void YoloV8DecoderNode::InputCallback(const nvidia::isaac_ros::nitros::NitrosTen
       height_scaled = height / scale;
     }
     bboxes.push_back(cv::Rect(x1_scaled, y1_scaled, width_scaled, height_scaled));
+    model_bboxes.push_back(cv::Rect(
+        static_cast<int>(x1), static_cast<int>(y1),
+        static_cast<int>(width), static_cast<int>(height)));
     indices.push_back(i);
     scores.push_back(val_max_conf);
     classes.push_back(max_index);
@@ -243,6 +269,89 @@ void YoloV8DecoderNode::InputCallback(const nvidia::isaac_ros::nitros::NitrosTen
   final_detections_arr.header.stamp.sec = msg.GetTimestampSeconds();
   final_detections_arr.header.stamp.nanosec = msg.GetTimestampNanoseconds();
   pub_->publish(final_detections_arr);
+
+  if (!seg_enabled_ || !mask_pub_) {
+    return;
+  }
+
+  // ---- Seg mask assembly ----
+  // For every NMS-surviving detection, reconstruct its pixel mask by linearly
+  // combining the 32 mask prototypes using the anchor's mask coefficients,
+  // then OR-merging each instance mask into a single binary image. The output
+  // is cropped to the valid (non-padded) region so downstream resize nodes
+  // receive a mask at the original-image aspect ratio.
+  const size_t proto_plane = static_cast<size_t>(proto_h_) * proto_w_;
+  const size_t expected_proto = static_cast<size_t>(num_mask_coef_) * proto_plane;
+  if (proto_float_count < expected_proto) {
+    RCLCPP_ERROR(this->get_logger(),
+      "proto tensor too small: got %zu floats, expected %zu",
+      proto_float_count, expected_proto);
+    return;
+  }
+
+  cv::Mat combined(static_cast<int>(resized_height),
+                   static_cast<int>(resized_width), CV_8UC1, cv::Scalar(0));
+  cv::Mat proto_mat(static_cast<int>(num_mask_coef_),
+                    static_cast<int>(proto_plane), CV_32F,
+                    proto_vector.data());
+
+  std::vector<float> coef(static_cast<size_t>(num_mask_coef_));
+  for (size_t k = 0; k < indices.size(); k++) {
+    const int anchor = indices[k];
+    for (int m = 0; m < num_mask_coef_; m++) {
+      const size_t offset =
+        static_cast<size_t>(out_dim) * (4 + num_classes_ + m) + anchor;
+      coef[m] = (offset < float_count) ? results_data[offset] : 0.0f;
+    }
+    cv::Mat coef_mat(1, static_cast<int>(num_mask_coef_), CV_32F, coef.data());
+    cv::Mat logits = coef_mat * proto_mat;                 // (1, proto_plane)
+    cv::Mat proto_logits = logits.reshape(
+        1, static_cast<int>(proto_h_));                    // (proto_h, proto_w)
+    cv::Mat sig_exp;
+    cv::exp(proto_logits * -1.0f, sig_exp);
+    cv::Mat mask_sig = 1.0f / (1.0f + sig_exp);            // sigmoid
+    cv::Mat mask_bin;
+    cv::compare(mask_sig, mask_threshold_, mask_bin, cv::CMP_GT);  // CV_8UC1
+    cv::Mat mask_net;
+    cv::resize(mask_bin, mask_net,
+               cv::Size(static_cast<int>(resized_width),
+                        static_cast<int>(resized_height)),
+               0, 0, cv::INTER_NEAREST);
+
+    cv::Rect crop = model_bboxes[anchor] &
+        cv::Rect(0, 0, combined.cols, combined.rows);
+    if (crop.area() == 0) {
+      continue;
+    }
+    cv::Mat dst = combined(crop);
+    cv::max(dst, mask_net(crop), dst);
+  }
+
+  // Extract the valid (non-padded) region so the published mask matches the
+  // original-image aspect ratio expected by downstream resize nodes. Assumes
+  // the pad node uses BOTTOM_RIGHT padding (the convention used by the
+  // sns_foundationpose launch graph).
+  int valid_w = combined.cols;
+  int valid_h = combined.rows;
+  if (original_width_ > 0 && original_height_ > 0 && scale > 0.0f) {
+    valid_w = std::min(combined.cols,
+                       static_cast<int>(original_width_ * scale));
+    valid_h = std::min(combined.rows,
+                       static_cast<int>(original_height_ * scale));
+  }
+  cv::Mat publish_mask = combined(cv::Rect(0, 0, valid_w, valid_h)).clone();
+
+  sensor_msgs::msg::Image mask_msg;
+  mask_msg.header.stamp.sec = msg.GetTimestampSeconds();
+  mask_msg.header.stamp.nanosec = msg.GetTimestampNanoseconds();
+  mask_msg.height = publish_mask.rows;
+  mask_msg.width = publish_mask.cols;
+  mask_msg.encoding = "mono8";
+  mask_msg.is_bigendian = 0;
+  mask_msg.step = publish_mask.cols;
+  mask_msg.data.assign(publish_mask.data,
+                       publish_mask.data + publish_mask.total());
+  mask_pub_->publish(std::move(mask_msg));
 }
 
 }  // namespace yolov8
