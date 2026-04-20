@@ -69,7 +69,8 @@ YoloV8DecoderNode::YoloV8DecoderNode(const rclcpp::NodeOptions options)
   num_mask_coef_{declare_parameter<int64_t>("num_mask_coef", 32)},
   proto_h_{declare_parameter<int64_t>("proto_h", 160)},
   proto_w_{declare_parameter<int64_t>("proto_w", 160)},
-  mask_threshold_{declare_parameter<double>("mask_threshold", 0.5)}
+  mask_threshold_{declare_parameter<double>("mask_threshold", 0.5)},
+  pad_type_{declare_parameter<std::string>("pad_type", "bottom_right")}
 {
   if (seg_enabled_) {
     // Publishes a per-pixel label map (CV_8UC1): 0 = background, k in
@@ -179,8 +180,18 @@ void YoloV8DecoderNode::InputCallback(const nvidia::isaac_ros::nitros::NitrosTen
   if (original_width_ > 0 && original_height_ > 0) {
     scale = std::min(static_cast<float>(resized_width) / static_cast<float>(original_width_),
                      static_cast<float>(resized_height) / static_cast<float>(original_height_));
-    padding_x = (static_cast<float>(resized_width) - (original_width_ * scale)) / 2.0f;
-    padding_y = (static_cast<float>(resized_height) - (original_height_ * scale)) / 2.0f;
+    // Where does the original image sit inside the padded square? The upstream
+    // pad node in this project uses BOTTOM_RIGHT (valid image at top-left, pad
+    // below/right), not the CENTER convention that the original decoder
+    // assumed. Match whatever the launch says via pad_type.
+    if (pad_type_ == "center") {
+      padding_x = (static_cast<float>(resized_width) - (original_width_ * scale)) / 2.0f;
+      padding_y = (static_cast<float>(resized_height) - (original_height_ * scale)) / 2.0f;
+    } else {
+      // bottom_right (default): original image starts at (0, 0).
+      padding_x = 0.0f;
+      padding_y = 0.0f;
+    }
   }
 
   for (int i = 0; i < out_dim; i++) {
@@ -275,6 +286,16 @@ void YoloV8DecoderNode::InputCallback(const nvidia::isaac_ros::nitros::NitrosTen
   pub_->publish(final_detections_arr);
 
   if (!seg_enabled_ || !mask_pub_) {
+    return;
+  }
+
+  // Skip seg publishing until camera_info has arrived. Before that we do not
+  // know the original image aspect ratio, so cropping the pad region would
+  // fall back to the full 640x640 model space and break downstream consumers
+  // that expect the mask to match the resized color image (e.g. 640x360).
+  if (original_width_ <= 0 || original_height_ <= 0 || scale <= 0.0f) {
+    RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+      "seg label map withheld: waiting for camera_info");
     return;
   }
 

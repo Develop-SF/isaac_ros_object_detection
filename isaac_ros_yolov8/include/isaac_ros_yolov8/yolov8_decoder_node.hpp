@@ -84,6 +84,13 @@ private:
   int64_t proto_w_{};
   double mask_threshold_{};
 
+  // Padding convention used by the upstream pad node when it embeds the
+  // original image inside the square network input. Supported values:
+  //   "bottom_right" (default) — original image sits at (0,0); pad fills
+  //                              right + bottom gaps.
+  //   "center"                 — original image centered; pad split evenly.
+  std::string pad_type_{};
+
   // Original image size obtained from camera info (used to map detections)
   int original_width_ = 0;
   int original_height_ = 0;
