@@ -36,10 +36,10 @@
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/image_encodings.hpp>
 #include <std_msgs/msg/string.hpp>
-#include <cv_bridge/cv_bridge.h>
+#include <cv_bridge/cv_bridge.hpp>
 
-#include <message_filters/subscriber.h>
-#include <message_filters/sync_policies/exact_time.h>
+#include <message_filters/subscriber.hpp>
+#include <message_filters/sync_policies/exact_time.hpp>
 #include <message_filters/synchronizer.h>
 
 #include "isaac_ros_common/qos.hpp"
@@ -71,6 +71,7 @@ public:
     desired_class_id_(declare_parameter<std::string>("desired_class_id", "")),
     desired_class_name_(declare_parameter<std::string>("desired_class_name", "")),
     vlm_prompt_(declare_parameter<std::string>("vlm_prompt", "What is this? soy sauce or oil or seasoning")),
+    vlm_api_(declare_parameter<std::string>("vlm_api", "ollama")),
     vlm_model_(declare_parameter<std::string>("vlm_model", "qwen2.5vl:7b")),
     vlm_url_(declare_parameter<std::string>("vlm_url", "http://localhost:11434")),
     timeout_seconds_(std::max<int>(declare_parameter<int>("timeout", 300), 0)),
@@ -686,38 +687,71 @@ private:
       local_client.set_read_timeout(timeout_seconds_, 0);
     }
 
-    // Build JSON payload with Ollama structured outputs format
+    // Build JSON payload — branch by backend API.
     std::ostringstream payload;
-    payload << "{\"model\":\"" << json_escape(vlm_model_) << "\","
-            << "\"messages\":[{\"role\":\"user\",\"content\":\"" 
-            << json_escape(prompt) << "\","
-            << "\"images\":[\"" << json_escape(image_base64) << "\"]}],"
-            << "\"stream\":false,"
-            << "\"format\":{"
-            << "\"type\":\"object\","
-            << "\"properties\":{"
-            << "\"id\":{\"type\":\"string\"},"
-            << "\"object_name\":{\"type\":\"string\"},"
-            << "\"concise_reason\":{\"type\":\"string\"}"
-            << "},"
-            << "\"required\":[\"id\",\"object_name\",\"concise_reason\"]"
-            << "}";
+    std::string endpoint;
 
-    if (max_token_ > 0) {
-      payload << R"(,"options":{"num_predict":)" << max_token_ << "}";
+    if (vlm_api_ == "openai") {
+      // OpenAI/vLLM chat-completions schema. Image goes in a content array as
+      // a data: URL; structured output via response_format json_object plus a
+      // schema reminder appended to the prompt (json_object mode requires the
+      // word "JSON" in the prompt and is supported across vLLM versions).
+      const std::string augmented_prompt = prompt +
+        "\n\nRespond as JSON with keys: id (string), "
+        "object_name (string), concise_reason (string).";
+      endpoint = "/v1/chat/completions";
+
+      payload << "{\"model\":\"" << json_escape(vlm_model_) << "\","
+              << "\"messages\":[{\"role\":\"user\",\"content\":["
+              << "{\"type\":\"text\",\"text\":\""
+              << json_escape(augmented_prompt) << "\"},"
+              << "{\"type\":\"image_url\",\"image_url\":{\"url\":\""
+              << "data:image/jpeg;base64," << image_base64 << "\"}}"
+              << "]}],"
+              << "\"response_format\":{\"type\":\"json_object\"},"
+              << "\"stream\":false";
+
+      if (max_token_ > 0) {
+        payload << ",\"max_tokens\":" << max_token_;
+      }
+
+      payload << "}";
+    } else {
+      // Ollama chat schema with structured outputs.
+      endpoint = "/api/chat";
+
+      payload << "{\"model\":\"" << json_escape(vlm_model_) << "\","
+              << "\"messages\":[{\"role\":\"user\",\"content\":\""
+              << json_escape(prompt) << "\","
+              << "\"images\":[\"" << json_escape(image_base64) << "\"]}],"
+              << "\"stream\":false,"
+              << "\"format\":{"
+              << "\"type\":\"object\","
+              << "\"properties\":{"
+              << "\"id\":{\"type\":\"string\"},"
+              << "\"object_name\":{\"type\":\"string\"},"
+              << "\"concise_reason\":{\"type\":\"string\"}"
+              << "},"
+              << "\"required\":[\"id\",\"object_name\",\"concise_reason\"]"
+              << "}";
+
+      if (max_token_ > 0) {
+        payload << R"(,"options":{"num_predict":)" << max_token_ << "}";
+      }
+
+      payload << "}";
     }
-
-    payload << "}";
 
     RCLCPP_DEBUG_THROTTLE(
       get_logger(), *get_clock(), 5000,
-      "VLM request payload: %s", payload.str().c_str());
+      "VLM request payload (api=%s): %s",
+      vlm_api_.c_str(), payload.str().c_str());
 
     httplib::Headers headers = {
       {"Content-Type", "application/json"}
     };
 
-    auto response = local_client.Post("/api/chat", headers, payload.str(), "application/json");
+    auto response = local_client.Post(endpoint.c_str(), headers, payload.str(), "application/json");
     if (!response) {
       RCLCPP_INFO(get_logger(), "VLM request failed: %s", httplib::to_string(response.error()).c_str());
       return std::nullopt;
@@ -732,7 +766,7 @@ private:
       return std::nullopt;
     }
 
-    const std::string output_text = extract_output_text(response->body);
+    const std::string output_text = extract_output_text(response->body, vlm_api_);
     if (!output_text.empty()) {
       logStatistics(response->body);
       // Inject the track_id into the response since VLM doesn't know it
@@ -761,7 +795,7 @@ private:
   // log the statistics of the VLM model
   void logStatistics(const std::string & body)
   {
-    const ResponseStatistics stats = compute_statistics(body);
+    const ResponseStatistics stats = compute_statistics(body, vlm_api_);
     if (!has_statistics(stats)) {
       return;
     }
@@ -864,6 +898,7 @@ private:
   std::string desired_class_id_;
   std::string desired_class_name_;
   std::string vlm_prompt_;
+  std::string vlm_api_;
   std::string vlm_model_;
   std::string vlm_url_;
   int timeout_seconds_;

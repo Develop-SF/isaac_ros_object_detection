@@ -141,7 +141,14 @@ inline std::string decode_json_string(const std::string& value) {
     return decoded;
 }
 
-inline std::string extract_output_text(const std::string& body) {
+inline std::string extract_output_text(
+    const std::string& body, const std::string& api = "ollama") {
+    // Both Ollama and OpenAI/vLLM responses contain "message":{"content":"..."}.
+    // For OpenAI it lives inside choices[0]; for Ollama it's at the top level.
+    // The first match below works for both. The api parameter is reserved for
+    // future per-backend tweaks (e.g. multi-choice OpenAI responses).
+    (void)api;
+
     std::istringstream stream(body);
     std::string line;
     std::string accumulated;
@@ -250,9 +257,25 @@ inline std::optional<long long> parse_long_long(const std::string& value) {
     }
 }
 
-inline ResponseStatistics compute_statistics(const std::string& source) {
+inline ResponseStatistics compute_statistics(
+    const std::string& source, const std::string& api = "ollama") {
     ResponseStatistics stats;
 
+    if (api == "openai") {
+        // vLLM/OpenAI: usage.prompt_tokens / completion_tokens. No latency in
+        // body — caller measures wall-clock separately.
+        const auto prompt_tokens = parse_long_long(extract_json_value(source, "prompt_tokens"));
+        const auto completion_tokens = parse_long_long(extract_json_value(source, "completion_tokens"));
+        if (prompt_tokens) {
+            stats.input_tokens = *prompt_tokens;
+        }
+        if (completion_tokens) {
+            stats.output_tokens = *completion_tokens;
+        }
+        return stats;
+    }
+
+    // Ollama format
     const auto prompt_eval_count = parse_long_long(extract_json_value(source, "prompt_eval_count"));
     const auto eval_count = parse_long_long(extract_json_value(source, "eval_count"));
     const auto total_duration_ns = parse_long_long(extract_json_value(source, "total_duration"));
