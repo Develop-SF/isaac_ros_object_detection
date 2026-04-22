@@ -55,12 +55,16 @@ find_package(ament_cmake_python REQUIRED)
 # Ensure CUDA imported targets (e.g., CUDA::nvtx3) are available
 find_package(CUDAToolkit REQUIRED)
 
-# NVTX
+# NVTX — CUDA 13 dropped CUDA::nvToolsExt, replaced by header-only CUDA::nvtx3
 option(USE_NVTX "Enable NVTX markers for improved profiling (if available)" ON)
 if(USE_NVTX)
     add_definitions(-DUSE_NVTX)
     link_directories("${CUDA_TOOLKIT_ROOT_DIR}/lib64")
-    link_libraries("CUDA::nvToolsExt")
+    if(TARGET CUDA::nvtx3)
+        link_libraries(CUDA::nvtx3)
+    elseif(TARGET CUDA::nvToolsExt)
+        link_libraries(CUDA::nvToolsExt)
+    endif()
 endif()
 
 # yolov8 Detection2DArray VLM Filter node
