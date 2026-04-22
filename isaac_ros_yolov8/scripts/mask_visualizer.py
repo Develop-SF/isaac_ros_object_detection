@@ -33,9 +33,25 @@ class MaskVisualizer(Node):
             Image,
             '/color_image_resized')
 
-        self.time_synchronizer = message_filters.TimeSynchronizer(
+        # ApproximateTimeSynchronizer with 50 ms slop instead of strict
+        # TimeSynchronizer. The mask stamp comes from target_mask_extractor
+        # (which copies the VLM-selected Detection2D's header) and the
+        # image stamp comes from resize_yolo_node (NITROS C++). Both
+        # ultimately derive from the same camera frame, but the two paths
+        # may emit slightly different stamps (ns-level rounding, header
+        # rewrites). Strict TimeSynchronizer therefore drops most pairs
+        # and /invert_mask flickers at ~4 Hz instead of the 30-60 Hz that
+        # the upstream topics publish. Slop = 0.05 s is enough to absorb
+        # the ns / sub-frame mismatches without crossing into the next
+        # camera frame at ~60 Hz.
+        # queue_size=50 because /yolo_segmentation runs ~5x faster than
+        # /color_image_resized (211 Hz vs 41 Hz on Thor) -- the image
+        # queue would otherwise drain before the matching mask landed.
+        self.time_synchronizer = message_filters.ApproximateTimeSynchronizer(
             [self._masks_subscription, self._image_subscription],
-            10)
+            queue_size=50,
+            slop=0.05,
+        )
 
         self.time_synchronizer.registerCallback(self.masks_callback)
 
