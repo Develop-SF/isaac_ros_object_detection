@@ -478,9 +478,27 @@ private:
         desired_class_name_ = new_value;
         result.reason = "Desired class name updated: '" + desired_class_name_ + "'";
         
+      } else if (param.get_name() == "desired_class_id") {
+        // Runtime class_id change. Accepts any string (empty = pass all
+        // classes; non-empty = pre-filter to that class_id before VLM).
+        // Must be handled explicitly -- without this branch the ROS2
+        // pre-set callback returns the default {successful=false,
+        // reason=""} for this param, and rclcpp rejects the whole batch
+        // when active_target_manager swaps targets.
+        std::string new_value = param.as_string();
+        result.successful = true;
+        if (new_value != desired_class_id_) {
+          RCLCPP_INFO(get_logger(),
+                      "Desired class_id updated: '%s' -> '%s'",
+                      desired_class_id_.c_str(), new_value.c_str());
+          desired_class_id_ = new_value;
+        }
+        result.reason = "Desired class_id updated: '" + desired_class_id_ + "'";
+
       } else if (param.get_name() == "vlm_prompt") {
         vlm_prompt_ = param.as_string();
         RCLCPP_INFO(get_logger(), "VLM prompt updated: '%s'", vlm_prompt_.c_str());
+        result.successful = true;
         result.reason = "VLM prompt updated: '" + vlm_prompt_ + "'";
       }
     }
