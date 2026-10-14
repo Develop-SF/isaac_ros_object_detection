@@ -28,6 +28,16 @@
 #include "isaac_ros_nitros_tensor_list_type/nitros_tensor_list_view.hpp"
 #include "std_msgs/msg/header.hpp"
 
+#include "rclcpp/version.h"
+
+// Humble's rclcpp (16.x) only takes rmw_qos_profile_t for services; the
+// rclcpp::QoS overloads arrived in Iron (21.x)
+#if RCLCPP_VERSION_GTE(21, 0, 0)
+#define GROUNDING_DINO_SERVICES_QOS rclcpp::ServicesQoS()
+#else
+#define GROUNDING_DINO_SERVICES_QOS rmw_qos_profile_services_default
+#endif
+
 namespace nvidia
 {
 namespace isaac_ros
@@ -73,16 +83,16 @@ GroundingDinoPreprocessorNode::GroundingDinoPreprocessorNode(const rclcpp::NodeO
     std::bind(
       &GroundingDinoPreprocessorNode::SetPromptCallback, this,
       std::placeholders::_1, std::placeholders::_2),
-    rclcpp::ServicesQoS(),
+    GROUNDING_DINO_SERVICES_QOS,
     service_cb_group_);
 
   // Create service client for GetTextTokens
   get_text_tokens_client_ = create_client<isaac_ros_grounding_dino_interfaces::srv::GetTextTokens>(
-    "get_text_tokens", rclcpp::ServicesQoS(), get_text_tokens_cb_group_);
+    "get_text_tokens", GROUNDING_DINO_SERVICES_QOS, get_text_tokens_cb_group_);
 
   // Create service client for SyncDataWithDecoder
   sync_data_client_ = create_client<isaac_ros_grounding_dino_interfaces::srv::SyncDataWithDecoder>(
-    "sync_data_with_decoder", rclcpp::ServicesQoS(), sync_data_cb_group_);
+    "sync_data_with_decoder", GROUNDING_DINO_SERVICES_QOS, sync_data_cb_group_);
 }
 
 GroundingDinoPreprocessorNode::~GroundingDinoPreprocessorNode()

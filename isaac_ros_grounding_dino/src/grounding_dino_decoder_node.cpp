@@ -22,6 +22,16 @@
 
 #include "isaac_ros_common/cuda_stream.hpp"
 
+#include "rclcpp/version.h"
+
+// Humble's rclcpp (16.x) only takes rmw_qos_profile_t for services; the
+// rclcpp::QoS overloads arrived in Iron (21.x)
+#if RCLCPP_VERSION_GTE(21, 0, 0)
+#define GROUNDING_DINO_SERVICES_QOS rclcpp::ServicesQoS()
+#else
+#define GROUNDING_DINO_SERVICES_QOS rmw_qos_profile_services_default
+#endif
+
 namespace nvidia
 {
 namespace isaac_ros
@@ -102,7 +112,7 @@ GroundingDinoDecoderNode::GroundingDinoDecoderNode(const rclcpp::NodeOptions opt
     std::bind(
       &GroundingDinoDecoderNode::SyncDataWithDecoderCallback, this,
       std::placeholders::_1, std::placeholders::_2),
-    rclcpp::ServicesQoS(),
+    GROUNDING_DINO_SERVICES_QOS,
     service_callback_group_);
 }
 

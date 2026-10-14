@@ -41,7 +41,8 @@ install(PROGRAMS
 
 # NVTX
 option(USE_NVTX "Enable NVTX markers for improved profiling (if available)" ON)
-if(USE_NVTX)
+# CUDA::nvtx3 needs CMake >= 3.25; Humble images ship 3.22
+if(USE_NVTX AND TARGET CUDA::nvtx3)
     add_definitions(-DUSE_NVTX)
     link_directories("${CUDA_TOOLKIT_ROOT_DIR}/lib64")
     link_libraries("CUDA::nvtx3")
